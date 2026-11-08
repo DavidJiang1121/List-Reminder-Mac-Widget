@@ -22,6 +22,9 @@ Requires an **Apple Silicon Mac** running **macOS 26 or later**. The current bui
 
 - **Desktop to-dos** that stay available after closing the main window.
 - **Double-click to complete** in both the app and widget. Clicking the widget does not open the main window.
+- **Calendar countdowns** with optional due dates: red for overdue, orange for today or `1d`–`3d`, and green from `4d` onward.
+- **Quick add on the desktop** from the widget’s **+**, with an optional calendar date.
+- **Full-screen fireworks** and a “完成了！！！” (Completed!) animation when a task is completed. The overlay fades out after about three seconds and does not intercept mouse input.
 - **Native Liquid Glass** powered by `NSGlassEffectView`, with adjustable background transparency and fully readable text.
 - **Adjustable layout** with drag-to-move, corner resizing, presets, and width/height controls.
 - **Position lock** to prevent accidental dragging and corner resizing while keeping task completion available.
@@ -31,7 +34,7 @@ Requires an **Apple Silicon Mac** running **macOS 26 or later**. The current bui
 
 ## Usage
 
-1. Type a task in the main window and press Return.
+1. Open the add form from the main window or the widget’s **+**. Enable a countdown if needed, select a date in the calendar, and add the task.
 2. Double-click a row in the app or widget to complete it. Double-click a completed task in the app to restore it.
 3. Open **小组件外观** (Widget Appearance) to adjust transparency, dimensions, and color scheme.
 4. Drag the widget into place, then enable **锁定位置** (Lock Position).
