@@ -37,3 +37,9 @@ Swift、AppKit、SwiftUI、Combine。运行目标为 Apple Silicon / macOS 26+�
 
 - [NSGlassEffectView](https://developer.apple.com/documentation/appkit/nsglasseffectview)
 - [nonactivatingPanel](https://developer.apple.com/documentation/appkit/nswindow/stylemask-swift.struct/nonactivatingpanel)
+
+## 1.2 倒计时与烟花
+
+截止日期保存为公历年、月、日。倒计时先取设备本地日期，再比较两个日历日，避免夏令时导致 23 或 25 小时时误算。旧数据不含截止日期时不显示倒计时。
+
+快速添加小窗可接收输入，不需要打开主窗口。成功保存一次完成操作后才播放烟花；恢复、撤销和失败写入不播放。全屏覆盖层不接收鼠标或键盘焦点，并尊重系统的“减弱动态效果”。
