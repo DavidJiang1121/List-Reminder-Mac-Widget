@@ -16,9 +16,9 @@ import Foundation
         assert(store.add("  完成一件小事  "))
         assert(store.pending.first?.title == "完成一件小事")
         let id = store.pending[0].id
-        assert(store.rename(id, title: "测试中文 / 📝"))
-        assert(store.rename(id, title: "测试中文 / 📝"))
-        assert(!store.rename(id, title: "  "))
+        assert(store.edit(id, title: "测试中文 / 📝", deadline: nil))
+        assert(store.edit(id, title: "测试中文 / 📝", deadline: nil))
+        assert(!store.edit(id, title: "  ", deadline: nil))
         let row = WidgetRow(item: store.pending[0]) { store.toggle(id) }
         let single = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
         let double = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0.1, windowNumber: 0, context: nil, eventNumber: 2, clickCount: 2, pressure: 1)!
@@ -90,6 +90,70 @@ import Foundation
         let failing = ReminderStore(directory: failureRoot)
         assert(!failing.add("不能静默丢失"))
         assert(failing.reminders.isEmpty && failing.errorMessage != nil)
-        print("PASS: add/trim/limits, edit, single vs double click, complete/restore, undo/delete/clear, persistence, settings bounds, corruption backup, failed-write rollback, legacy settings migration, lock persistence, drag guard, resize guard, double-click while locked, unlock")
+        try verifyCountdowns(at: root.appendingPathComponent("countdowns"))
+        print("PASS: add/trim/limits, edit, single vs double click, complete/restore, undo/delete/clear, persistence, settings bounds, corruption backup, failed-write rollback, legacy migration, lock/resize guards, calendar deadlines, DST and time-zone changes, urgency rollover, widget plus while locked, completion-only celebration")
+    }
+
+    @MainActor private static func verifyCountdowns(at root: URL) throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let oldData = """
+        {"version":1,"reminders":[{"id":"01234567-89AB-CDEF-0123-456789ABCDEF","title":"旧版待办","createdAt":0,"isCompleted":false}],"settings":{"isPositionLocked":true}}
+        """
+        try Data(oldData.utf8).write(to: root.appendingPathComponent("reminders.json"))
+        let store = ReminderStore(directory: root)
+        assert(store.errorMessage == nil && store.pending.count == 1 && store.pending[0].deadline == nil)
+        let pacific = TimeZone(identifier: "America/Los_Angeles")!
+        var local = Calendar(identifier: .gregorian)
+        local.timeZone = pacific
+        func march(_ day: Int) -> Date { local.date(from: DateComponents(year: 2026, month: 3, day: day, hour: 12))! }
+        let deadline = ReminderDeadline(march(10), calendar: local)
+        store.refreshDay(now: march(6), timeZone: pacific)
+        assert(deadline.countdown(on: store.countdownDay)?.label == "4d")
+        assert(deadline.countdown(on: store.countdownDay)?.tone == .planned)
+        assert(store.add("有截止日期", deadline: deadline))
+        assert(store.add("不倒计时"))
+        let item = store.pending[1]
+        assert(item.deadline == deadline && store.pending[2].deadline == nil)
+        assert(ReminderStore(directory: root).pending[1].deadline == deadline)
+        let surface = WidgetSurface(store: store)
+        surface.layoutSubtreeIfNeeded()
+        assert(surface.grip.isHidden && !surface.addButton.isHidden)
+        assert(!surface.addButton.frame.intersects(surface.scroll.frame))
+        assert(!surface.addButton.frame.intersects(surface.grip.frame))
+        var addCount = 0
+        surface.onAdd = { addCount += 1 }
+        surface.addButton.performClick(nil)
+        assert(addCount == 1 && store.pending.count == 3 && store.settings.isPositionLocked)
+        assert((surface.rows.subviews[1] as? WidgetRow)?.countdown?.tone == .planned)
+        store.refreshDay(now: march(7), timeZone: pacific)
+        surface.reload()
+        assert((surface.rows.subviews[1] as? WidgetRow)?.countdown?.label == "3d")
+        assert((surface.rows.subviews[1] as? WidgetRow)?.countdown?.tone == .soon)
+        store.refreshDay(now: march(8), timeZone: pacific)
+        surface.reload()
+        assert((surface.rows.subviews[1] as? WidgetRow)?.countdown == ReminderCountdown(days: 2))
+        let dueToday = deadline.countdown(on: ReminderDay(now: march(10), timeZone: pacific))
+        assert(dueToday?.label == "今天截止" && dueToday?.tone == .soon)
+        let overdue = deadline.countdown(on: ReminderDay(now: march(11), timeZone: pacific))
+        assert(overdue?.label == "-1d" && overdue?.tone == .overdue)
+        let instant = local.date(from: DateComponents(year: 2026, month: 3, day: 9, hour: 12))!
+        assert(deadline.countdown(on: ReminderDay(now: instant, timeZone: pacific))?.days == 1)
+        assert(deadline.countdown(on: ReminderDay(now: instant, timeZone: TimeZone(identifier: "Asia/Shanghai")!))?.days == 0)
+        var celebrations = 0
+        store.onCompletion = { celebrations += 1 }
+        store.toggle(item.id)
+        assert(celebrations == 1)
+        assert(store.completed[0].deadline == deadline && store.completed[0].countdown(on: store.countdownDay) == nil)
+        store.undo()
+        assert(celebrations == 1)
+        assert(store.pending[1].countdown(on: store.countdownDay)?.days == 2)
+        store.toggle(item.id)
+        assert(celebrations == 2)
+        store.toggle(item.id)
+        assert(celebrations == 2 && store.pending[1].deadline == deadline)
+        assert(store.edit(item.id, title: item.title, deadline: nil))
+        assert(ReminderStore(directory: root).pending[1].deadline == nil)
+        store.undo()
+        assert(store.pending[1].deadline == deadline)
     }
 }
