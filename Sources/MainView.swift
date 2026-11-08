@@ -304,14 +304,15 @@ private struct WidgetPreview: View {
                     }.padding(.vertical, 8)
                     Rectangle().fill(.primary.opacity(0.06)).frame(height: 0.5)
                 }
-                Spacer(minLength: 4)
-                Image(systemName: "plus").font(.system(size: 9, weight: .semibold))
-                    .frame(width: 18, height: 18).background(.primary.opacity(0.08), in: Circle())
-                    .frame(width: 22, height: 22)
-                    .frame(maxWidth: .infinity, alignment: .trailing).accessibilityHidden(true)
+                Spacer(minLength: 0)
             }
             .padding(18).frame(width: 200, height: min(340, max(225, store.settings.height * 0.65)))
             .background { PreviewGlass(transparency: store.settings.transparency) }
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: "plus").font(.system(size: 9, weight: .semibold))
+                    .frame(width: 18, height: 18).glassEffect(.regular, in: .circle)
+                    .padding(12).accessibilityHidden(true)
+            }
             .environment(\.colorScheme, store.settings.appearance == "dark" ? .dark : .light)
             .foregroundStyle(store.settings.appearance == "dark" ? Color.white : ink)
             .shadow(color: .black.opacity(0.13), radius: 15, y: 10)
