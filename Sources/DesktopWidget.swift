@@ -109,7 +109,8 @@ final class WidgetAddButton: NSButton {
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.labelColor.withAlphaComponent(cell?.isHighlighted == true ? 0.16 : 0.08).setFill()
-        NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+        let diameter = min(26, min(bounds.width, bounds.height))
+        NSBezierPath(ovalIn: NSRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2, width: diameter, height: diameter)).fill()
         super.draw(dirtyRect)
     }
 }
@@ -175,7 +176,7 @@ final class WidgetSurface: NSView {
         emptyTitle.alignment = .center
         addSubview(emptyTitle)
         addSubview(grip)
-        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 14, weight: .semibold))
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         addButton.imagePosition = .imageOnly
         addButton.isBordered = false
         addButton.contentTintColor = .labelColor
