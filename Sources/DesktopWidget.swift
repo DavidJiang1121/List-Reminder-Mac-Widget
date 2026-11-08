@@ -108,9 +108,10 @@ final class WidgetAddButton: NSButton {
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.labelColor.withAlphaComponent(cell?.isHighlighted == true ? 0.16 : 0.08).setFill()
-        let diameter = min(26, min(bounds.width, bounds.height))
-        NSBezierPath(ovalIn: NSRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2, width: diameter, height: diameter)).fill()
+        if cell?.isHighlighted == true {
+            NSColor.labelColor.withAlphaComponent(0.12).setFill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).fill()
+        }
         super.draw(dirtyRect)
     }
 }
@@ -151,6 +152,7 @@ final class WidgetSurface: NSView {
     let rows = WidgetRows()
     let emptyTitle = NSTextField(labelWithString: "")
     let grip = ResizeGrip()
+    let addGlass = NSGlassEffectView()
     let addButton = WidgetAddButton(frame: .zero)
     var onAdd: (() -> Void)?
     private var subscription: AnyCancellable?
@@ -176,6 +178,10 @@ final class WidgetSurface: NSView {
         emptyTitle.alignment = .center
         addSubview(emptyTitle)
         addSubview(grip)
+        addGlass.style = .regular
+        addGlass.cornerRadius = 13
+        addGlass.setAccessibilityElement(false)
+        addSubview(addGlass)
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         addButton.imagePosition = .imageOnly
         addButton.isBordered = false
@@ -217,14 +223,20 @@ final class WidgetSurface: NSView {
         let w = bounds.width, h = bounds.height
         glass.frame = bounds
         header.frame = NSRect(x: 0, y: h - 73, width: w, height: 73)
-        scroll.frame = NSRect(x: 0, y: 55, width: w, height: max(0, h - 128))
+        scroll.frame = NSRect(x: 0, y: 12, width: w, height: max(0, h - 85))
+        addButton.frame = NSRect(x: w - 59, y: 13, width: 34, height: 34)
+        addGlass.frame = addButton.frame.insetBy(dx: 4, dy: 4)
         let rowHeight: CGFloat = 54
-        rows.frame = NSRect(x: 0, y: 0, width: w, height: max(scroll.contentSize.height, CGFloat(rows.subviews.count) * rowHeight))
+        let itemsHeight = CGFloat(rows.subviews.count) * rowHeight
+        let viewportHeight = scroll.contentSize.height
+        // Extend only the scrollable document when needed, so the last item can clear the floating control.
+        let clearance = addButton.frame.maxY - scroll.frame.minY + 3
+        let tail = itemsHeight > viewportHeight - clearance ? clearance : 0
+        rows.frame = NSRect(x: 0, y: 0, width: w, height: max(viewportHeight, itemsHeight + tail))
         for (index, row) in rows.subviews.enumerated() {
             row.frame = NSRect(x: 0, y: CGFloat(index) * rowHeight, width: w, height: rowHeight)
         }
         emptyTitle.frame = NSRect(x: 18, y: h * 0.5, width: w - 36, height: 28)
-        addButton.frame = NSRect(x: w - 59, y: 13, width: 34, height: 34)
         grip.frame = NSRect(x: w - 22, y: 3, width: 17, height: 17)
     }
 }
