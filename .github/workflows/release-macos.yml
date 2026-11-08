@@ -1,0 +1,71 @@
+name: Publish macOS installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'solitarystar123/DavidJiang' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the selected source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-tags "https://github.com/$GITHUB_REPOSITORY.git" project
+          git -C project checkout --detach "$GITHUB_SHA"
+      - name: Test and build the Apple Silicon app
+        shell: bash
+        working-directory: project
+        run: |
+          set -euo pipefail
+          zsh ./test.sh
+          zsh ./build.sh "$RUNNER_TEMP/ListReminder-build"
+      - name: Package and verify the signed bundle
+        shell: bash
+        working-directory: project
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/ListReminder-package"
+          staging="$RUNNER_TEMP/ListReminder-staging"
+          mkdir -p "$package" "$staging"
+          cp -R "$RUNNER_TEMP/ListReminder-build/List Reminder.app" "$staging/"
+          cp docs/使用说明.md "$staging/使用说明.md"
+          ditto -c -k "$staging" "$package/List-Reminder-macOS-arm64.zip"
+          ditto -x -k "$package/List-Reminder-macOS-arm64.zip" "$RUNNER_TEMP/ListReminder-verified"
+          codesign --verify --deep --strict "$RUNNER_TEMP/ListReminder-verified/List Reminder.app"
+          (cd "$package" && shasum -a 256 List-Reminder-macOS-arm64.zip > SHA256SUMS.txt)
+      - name: Attach the installer and publish the release
+        shell: bash
+        working-directory: project
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Info.plist)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          notes="docs/releases/$tag.md"
+          title="List Reminder $version — 简约桌面待办，放好就锁定"
+          package="$RUNNER_TEMP/ListReminder-package"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft >/dev/null 2>&1; then
+            draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+            if [[ "$draft" != true ]]; then
+              echo "Release $tag already exists; nothing will be overwritten." >&2
+              exit 1
+            fi
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "$title" --notes-file "$notes"
+          fi
+          gh release upload "$tag" "$package/List-Reminder-macOS-arm64.zip" "$package/SHA256SUMS.txt" --repo "$GITHUB_REPOSITORY"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --target "$GITHUB_SHA" --title "$title" --notes-file "$notes" --latest
