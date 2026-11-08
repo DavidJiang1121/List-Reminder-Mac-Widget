@@ -17,7 +17,7 @@ private final class QuickAddPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var store: ReminderStore!
     var widget: WidgetController!
     var window: NSWindow!
@@ -25,6 +25,7 @@ private final class QuickAddPanel: NSPanel {
     private var quickAddPanel: QuickAddPanel?
     private var dayTimer: Timer?
     private let celebration = CompletionCelebration()
+    private let quickAddFocus = QuickAddFocus()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let testDirectory = ProcessInfo.processInfo.environment["LIST_REMINDER_DATA_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -33,6 +34,7 @@ private final class QuickAddPanel: NSPanel {
         widget.surface.onAdd = { [weak self] in self?.showQuickAdd() }
         store.onCompletion = { [weak self] in self?.celebrateCompletion() }
         startCountdownClock()
+        NotificationCenter.default.addObserver(self, selector: #selector(recenterQuickAdd), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         configureMenu()
         configureStatusItem()
         let content = MainView(store: store, resetPosition: { [weak self] in self?.widget.resetPosition() })
@@ -50,7 +52,7 @@ private final class QuickAddPanel: NSPanel {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showMain(); return true }
-    func applicationWillTerminate(_ notification: Notification) { dayTimer?.invalidate(); celebration.dismiss(); widget?.saveFrame() }
+    func applicationWillTerminate(_ notification: Notification) { dayTimer?.invalidate(); celebration.dismiss(); quickAddFocus.dismiss(animated: false); widget?.saveFrame() }
 
     private func celebrateCompletion() {
         let cursor = NSEvent.mouseLocation
@@ -58,7 +60,7 @@ private final class QuickAddPanel: NSPanel {
         if let screen { celebration.show(on: screen) }
     }
 
-    @objc func showMain() { window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    @objc func showMain() { quickAddPanel?.close(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func newReminder() { showMain(); NotificationCenter.default.post(name: .newReminder, object: nil) }
     @objc func settings() { showMain(); NotificationCenter.default.post(name: .showWidgetSettings, object: nil) }
     @objc func toggleWidget() { store.updateSettings { $0.isVisible.toggle() } }
@@ -76,24 +78,43 @@ private final class QuickAddPanel: NSPanel {
         panel.isReleasedWhenClosed = false
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
-        panel.level = .floating
-        panel.collectionBehavior = [.moveToActiveSpace, .transient, .ignoresCycle]
+        panel.level = QuickAddFocus.editorLevel
+        panel.isMovable = false
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient, .ignoresCycle]
         panel.appearance = widget.surface.appearance
         let editor = NSHostingView(rootView: ReminderEditor(store: store, close: { [weak panel] in panel?.close() }))
         panel.contentView = editor
         panel.setContentSize(editor.fittingSize)
-        if widget.panel.isVisible, let screen = widget.panel.screen ?? NSScreen.main {
-            let area = screen.visibleFrame.insetBy(dx: 12, dy: 12)
-            let anchor = widget.panel.frame
-            let left = anchor.minX - panel.frame.width - 10
-            let right = anchor.maxX + 10
-            let candidate = left >= area.minX ? left : right
-            let x = max(area.minX, min(area.maxX - panel.frame.width, candidate))
-            let y = max(area.minY, min(area.maxY - panel.frame.height, anchor.maxY - panel.frame.height))
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        let pointer = NSEvent.mouseLocation
+        let pointerScreen = NSScreen.screens.first { $0.frame.contains(pointer) }
+        if let screen = (widget.panel.isVisible ? widget.panel.screen : nil) ?? pointerScreen ?? NSScreen.main {
+            center(panel, on: screen)
+            quickAddFocus.show(on: screen, refocus: { [weak panel] in panel?.makeKeyAndOrderFront(nil) })
         } else { panel.center() }
+        panel.delegate = self
         quickAddPanel = panel
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func center(_ panel: NSWindow, on screen: NSScreen) {
+        let area = screen.frame
+        panel.setFrameOrigin(NSPoint(x: area.midX - panel.frame.width / 2, y: area.midY - panel.frame.height / 2))
+    }
+
+    @objc private func recenterQuickAdd(_ notification: Notification) {
+        guard let panel = quickAddPanel, let screen = panel.screen ?? NSScreen.main else { return }
+        quickAddFocus.move(to: screen)
+        center(panel, on: screen)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        if let panel = quickAddPanel, notification.object as? NSWindow === panel { recenterQuickAdd(notification) }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let panel = quickAddPanel, notification.object as? NSWindow === panel else { return }
+        quickAddPanel = nil
+        quickAddFocus.dismiss()
     }
 
     private func startCountdownClock() {
