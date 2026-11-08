@@ -12,16 +12,27 @@ import SwiftUI
     }
 }
 
+private final class QuickAddPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     var store: ReminderStore!
     var widget: WidgetController!
     var window: NSWindow!
     var status: NSStatusItem!
+    private var quickAddPanel: QuickAddPanel?
+    private var dayTimer: Timer?
+    private let celebration = CompletionCelebration()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let testDirectory = ProcessInfo.processInfo.environment["LIST_REMINDER_DATA_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
         store = ReminderStore(directory: testDirectory)
         widget = WidgetController(store: store)
+        widget.surface.onAdd = { [weak self] in self?.showQuickAdd() }
+        store.onCompletion = { [weak self] in self?.celebrateCompletion() }
+        startCountdownClock()
         configureMenu()
         configureStatusItem()
         let content = MainView(store: store, resetPosition: { [weak self] in self?.widget.resetPosition() })
@@ -39,7 +50,13 @@ import SwiftUI
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showMain(); return true }
-    func applicationWillTerminate(_ notification: Notification) { widget?.saveFrame() }
+    func applicationWillTerminate(_ notification: Notification) { dayTimer?.invalidate(); celebration.dismiss(); widget?.saveFrame() }
+
+    private func celebrateCompletion() {
+        let cursor = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(cursor) } ?? NSApp.keyWindow?.screen ?? widget.panel.screen ?? NSScreen.main
+        if let screen { celebration.show(on: screen) }
+    }
 
     @objc func showMain() { window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func newReminder() { showMain(); NotificationCenter.default.post(name: .newReminder, object: nil) }
@@ -47,13 +64,62 @@ import SwiftUI
     @objc func toggleWidget() { store.updateSettings { $0.isVisible.toggle() } }
     @objc func resetWidget() { widget.resetPosition(); store.updateSettings { $0.isVisible = true } }
 
+    @objc private func showQuickAdd() {
+        if let panel = quickAddPanel, panel.isVisible {
+            panel.makeKeyAndOrderFront(nil)
+            return
+        }
+        store.refreshDay()
+        let panel = QuickAddPanel(contentRect: NSRect(x: 0, y: 0, width: 390, height: 470), styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.title = "快速添加待办"
+        panel.titleVisibility = .hidden
+        panel.isReleasedWhenClosed = false
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.collectionBehavior = [.moveToActiveSpace, .transient, .ignoresCycle]
+        panel.appearance = widget.surface.appearance
+        let editor = NSHostingView(rootView: ReminderEditor(store: store, close: { [weak panel] in panel?.close() }))
+        panel.contentView = editor
+        panel.setContentSize(editor.fittingSize)
+        if widget.panel.isVisible, let screen = widget.panel.screen ?? NSScreen.main {
+            let area = screen.visibleFrame.insetBy(dx: 12, dy: 12)
+            let anchor = widget.panel.frame
+            let left = anchor.minX - panel.frame.width - 10
+            let right = anchor.maxX + 10
+            let candidate = left >= area.minX ? left : right
+            let x = max(area.minX, min(area.maxX - panel.frame.width, candidate))
+            let y = max(area.minY, min(area.maxY - panel.frame.height, anchor.maxY - panel.frame.height))
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        } else { panel.center() }
+        quickAddPanel = panel
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func startCountdownClock() {
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.store.refreshDay() }
+        }
+        timer.tolerance = 2
+        RunLoop.main.add(timer, forMode: .common)
+        dayTimer = timer
+        for name in [Notification.Name.NSCalendarDayChanged, .NSSystemClockDidChange, .NSSystemTimeZoneDidChange] {
+            NotificationCenter.default.addObserver(self, selector: #selector(refreshCountdownClock), name: name, object: nil)
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshCountdownClock), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func refreshCountdownClock(_ notification: Notification) {
+        Task { @MainActor [weak self] in self?.store.refreshDay() }
+    }
+
     private func configureStatusItem() {
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "checklist", accessibilityDescription: "List Reminder")
         status.button?.toolTip = "List Reminder"
         let menu = NSMenu()
         menu.addItem(item("打开 List Reminder", #selector(showMain), ""))
-        menu.addItem(item("添加待办…", #selector(newReminder), ""))
+        menu.addItem(item("快速添加待办…", #selector(showQuickAdd), ""))
         menu.addItem(.separator())
         menu.addItem(item("显示 / 隐藏桌面小组件", #selector(toggleWidget), ""))
         menu.addItem(item("小组件外观…", #selector(settings), ""))
