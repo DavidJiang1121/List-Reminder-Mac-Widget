@@ -23,7 +23,7 @@ Requires an **Apple Silicon Mac** running **macOS 26 or later**. The current bui
 - **Desktop to-dos** that stay available after closing the main window.
 - **Double-click to complete** in both the app and widget. Clicking the widget does not open the main window.
 - **Calendar countdowns** with optional due dates: red for overdue, orange for today or `1d`–`3d`, and green from `4d` onward.
-- **Quick add on the desktop** from the widget’s **+**, with an optional calendar date.
+- **Focused desktop quick add** from a floating Liquid Glass **+** that does not reserve a list row. The editor opens at screen center with a dimmed, animated star field.
 - **Full-screen fireworks** and a “完成了！！！” (Completed!) animation when a task is completed. The overlay fades out after about three seconds and does not intercept mouse input.
 - **Native Liquid Glass** powered by `NSGlassEffectView`, with adjustable background transparency and fully readable text.
 - **Adjustable layout** with drag-to-move, corner resizing, presets, and width/height controls.
