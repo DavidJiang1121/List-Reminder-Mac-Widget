@@ -7,15 +7,17 @@ private let muted = Color(red: 0.49, green: 0.51, blue: 0.48)
 private let paper = Color(red: 0.98, green: 0.975, blue: 0.96)
 
 enum AppSection: String, CaseIterable { case pending = "待办清单", completed = "已完成", appearance = "小组件外观" }
+private struct EditorSession: Identifiable {
+    let id = UUID()
+    var item: Reminder?
+}
 
 struct MainView: View {
     @ObservedObject var store: ReminderStore
     var resetPosition: () -> Void
     @State private var section: AppSection = .pending
-    @State private var draft = ""
-    @State private var editing: Reminder?
+    @State private var editing: EditorSession?
     @State private var confirmClear = false
-    @FocusState private var adding: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -32,7 +34,7 @@ struct MainView: View {
         .tint(accent)
         .frame(minWidth: 920, minHeight: 620)
         .preferredColorScheme(.light)
-        .sheet(item: $editing) { item in EditReminderView(store: store, item: item) }
+        .sheet(item: $editing) { session in ReminderEditor(store: store, item: session.item) }
         .alert("保存提示", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("知道了") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
@@ -40,7 +42,7 @@ struct MainView: View {
             Button("取消", role: .cancel) {}
             Button("清除", role: .destructive) { store.clearCompleted() }
         } message: { Text("清除后可以通过“撤销”恢复。") }
-        .onReceive(NotificationCenter.default.publisher(for: .newReminder)) { _ in section = .pending; adding = true }
+        .onReceive(NotificationCenter.default.publisher(for: .newReminder)) { _ in beginAdd() }
         .onReceive(NotificationCenter.default.publisher(for: .showWidgetSettings)) { _ in section = .appearance }
     }
 
@@ -139,26 +141,20 @@ struct MainView: View {
                 ScrollView {
                     LazyVStack(spacing: 7) {
                         ForEach(items) { item in
-                            ReminderRow(item: item, toggle: { store.toggle(item.id) }, edit: { editing = item }, delete: { store.remove(item.id) })
+                            ReminderRow(item: item, countdown: item.countdown(on: store.countdownDay), toggle: { store.toggle(item.id) }, edit: { editing = EditorSession(item: item) }, delete: { store.remove(item.id) })
                         }
                     }.padding(.vertical, 6)
                 }.scrollIndicators(.hidden)
             }
             if section == .pending {
-                HStack(spacing: 13) {
-                    Image(systemName: "plus").font(.system(size: 16)).foregroundStyle(accent)
-                    TextField("添加待办…", text: $draft)
-                        .textFieldStyle(.plain).font(.system(size: 13)).focused($adding)
-                        .onSubmit(add).accessibilityIdentifier("newTaskField")
-                    Button(action: add) {
-                        Image(systemName: "arrow.up").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                            .frame(width: 29, height: 29).background(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? accent.opacity(0.35) : accent, in: RoundedRectangle(cornerRadius: 9))
-                    }.buttonStyle(.plain).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .help("添加待办（回车）").accessibilityLabel("添加待办")
-                }
-                .padding(.horizontal, 17).padding(.vertical, 14)
-                .background(.white, in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(ink.opacity(0.09)))
+                Button(action: beginAdd) {
+                    Label("添加待办", systemImage: "plus")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(accent)
+                        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                        .padding(.horizontal, 17)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(ink.opacity(0.09)))
+                }.buttonStyle(.plain).accessibilityIdentifier("newTaskButton")
                 .padding(.top, 18)
             } else if !store.completed.isEmpty {
                 HStack {
@@ -236,11 +232,12 @@ struct MainView: View {
                 .foregroundStyle(selected ? accent : ink)
         }.buttonStyle(.plain).accessibilityLabel("\(title)尺寸")
     }
-    private func add() { if store.add(draft) { draft = ""; adding = true } }
+    private func beginAdd() { section = .pending; editing = EditorSession() }
 }
 
 private struct ReminderRow: View {
     var item: Reminder
+    var countdown: ReminderCountdown?
     var toggle: () -> Void
     var edit: () -> Void
     var delete: () -> Void
@@ -251,6 +248,7 @@ private struct ReminderRow: View {
                 .font(.system(size: 20, weight: .light)).foregroundStyle(item.isCompleted ? accent.opacity(0.75) : ink.opacity(0.23))
             Text(item.title).font(.system(size: 13, weight: .medium)).strikethrough(item.isCompleted, color: muted.opacity(0.6))
                 .foregroundStyle(item.isCompleted ? muted : ink).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+            if let countdown { CountdownBadge(countdown: countdown) }
             HStack(spacing: 12) {
                 Button(action: edit) { Image(systemName: "pencil").font(.system(size: 11)) }.help("编辑待办").accessibilityLabel("编辑：\(item.title)")
                 Button(action: delete) { Image(systemName: "trash").font(.system(size: 11)) }.help("删除待办").accessibilityLabel("删除：\(item.title)")
@@ -268,8 +266,21 @@ private struct ReminderRow: View {
             Button("删除", role: .destructive, action: delete)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(item.title)
+        .accessibilityLabel(countdown.map { "\(item.title)，\($0.spokenLabel)" } ?? item.title)
         .accessibilityAction(named: item.isCompleted ? "恢复待办" : "完成待办", toggle)
+    }
+}
+
+private struct CountdownBadge: View {
+    let countdown: ReminderCountdown
+    var size: CGFloat = 11
+    var body: some View {
+        let tone = Color(nsColor: countdown.color)
+        Text(countdown.label).font(.system(size: size, weight: .semibold)).monospacedDigit()
+            .foregroundStyle(tone).lineLimit(1).fixedSize()
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(tone.opacity(0.12), in: Capsule())
+            .accessibilityLabel(countdown.spokenLabel)
     }
 }
 
@@ -281,16 +292,22 @@ private struct WidgetPreview: View {
             Circle().fill(.white.opacity(0.2)).frame(width: 160).blur(radius: 19).offset(x: 60, y: -90)
             VStack(alignment: .leading, spacing: 0) {
                 HStack { Text("List Reminder").font(.system(size: 13, weight: .semibold)); Spacer() }.padding(.bottom, 18)
-                let titles = store.pending.isEmpty ? ["写下今天的第一件事", "为自己留一点时间"] : Array(store.pending.prefix(4).map(\.title))
-                ForEach(Array(titles.enumerated()), id: \.offset) { _, title in
+                let previewItems: [(String, ReminderCountdown?)] = store.pending.isEmpty
+                    ? [("写下今天的第一件事", nil), ("为自己留一点时间", nil)]
+                    : store.pending.prefix(3).map { ($0.title, $0.countdown(on: store.countdownDay)) }
+                ForEach(Array(previewItems.enumerated()), id: \.offset) { _, item in
                     HStack(spacing: 9) {
                         Image(systemName: "circle").foregroundStyle(.secondary).font(.system(size: 13))
-                        Text(title).font(.system(size: 10)).lineLimit(1)
+                        Text(item.0).font(.system(size: 10)).lineLimit(1)
                         Spacer(minLength: 0)
-                    }.padding(.vertical, 12)
+                        if let countdown = item.1 { CountdownBadge(countdown: countdown, size: 8) }
+                    }.padding(.vertical, 8)
                     Rectangle().fill(.primary.opacity(0.06)).frame(height: 0.5)
                 }
-                Spacer(minLength: 20)
+                Spacer(minLength: 4)
+                Image(systemName: "plus").font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22).background(.primary.opacity(0.08), in: Circle())
+                    .frame(maxWidth: .infinity, alignment: .trailing).accessibilityHidden(true)
             }
             .padding(18).frame(width: 200, height: min(340, max(225, store.settings.height * 0.65)))
             .background { PreviewGlass(transparency: store.settings.transparency) }
@@ -313,21 +330,75 @@ private struct PreviewGlass: NSViewRepresentable {
     func updateNSView(_ view: NSGlassEffectView, context: Context) { view.alphaValue = 1 - transparency }
 }
 
-private struct EditReminderView: View {
+struct ReminderEditor: View {
     @ObservedObject var store: ReminderStore
-    var item: Reminder
+    let item: Reminder?
+    var close: (() -> Void)?
     @State private var title: String
+    @State private var enablesCountdown: Bool
+    @State private var selectedDate: Date
+    @State private var saveError: String?
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focused: Bool
-    init(store: ReminderStore, item: Reminder) { self.store = store; self.item = item; _title = State(initialValue: item.title) }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("编辑待办").font(.system(size: 19, weight: .semibold))
-            TextField("待办内容", text: $title, axis: .vertical).lineLimit(3...6).textFieldStyle(.roundedBorder).focused($focused)
-            HStack { Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button("保存") { save() }.keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
-        }.padding(28).frame(width: 420).onAppear { focused = true }
+    init(store: ReminderStore, item: Reminder? = nil, close: (() -> Void)? = nil) {
+        self.store = store; self.item = item; self.close = close
+        let calendar = store.countdownDay.calendar
+        let initialDate = item?.deadline?.date(in: calendar) ?? calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) ?? .now
+        _title = State(initialValue: item?.title ?? "")
+        _enablesCountdown = State(initialValue: item?.deadline != nil)
+        _selectedDate = State(initialValue: initialDate)
     }
-    private func save() { if store.rename(item.id, title: title) { dismiss() } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(item == nil ? "添加待办" : "编辑待办").font(.system(size: 20, weight: .semibold))
+            TextField("待办内容", text: $title, axis: .vertical).lineLimit(2, reservesSpace: true)
+                .textFieldStyle(.roundedBorder).focused($focused).accessibilityIdentifier("reminderTitle")
+            Toggle("启用倒计时", isOn: $enablesCountdown).toggleStyle(.switch)
+                .accessibilityIdentifier("reminderCountdownToggle")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("截止日期").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    if enablesCountdown, let countdown = selectedDeadline.countdown(on: store.countdownDay) {
+                        CountdownBadge(countdown: countdown)
+                    }
+                }.frame(minHeight: 24)
+                DatePicker("截止日期", selection: $selectedDate, displayedComponents: [.date])
+                    .datePickerStyle(.graphical).labelsHidden()
+                    .environment(\.calendar, store.countdownDay.calendar)
+                    .environment(\.timeZone, store.countdownDay.timeZone)
+                    .environment(\.locale, Locale(identifier: "zh_CN"))
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("reminderDeadlineCalendar")
+            }.disabled(!enablesCountdown).opacity(enablesCountdown ? 1 : 0.46)
+            if let saveError { Text(saveError).font(.footnote).foregroundStyle(.red).lineLimit(3) }
+            Divider()
+            HStack(spacing: 12) {
+                Spacer()
+                Button("取消", action: finish).keyboardShortcut(.cancelAction)
+                Button(item == nil ? "添加" : "保存", action: save).keyboardShortcut(.defaultAction)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.count > 1000)
+            }
+        }
+        .padding(24).frame(width: 390)
+        .onAppear { DispatchQueue.main.async { focused = true } }
+        .onChange(of: store.countdownDay.timeZone) { oldZone, _ in
+            var oldCalendar = Calendar(identifier: .gregorian)
+            oldCalendar.timeZone = oldZone
+            let date = ReminderDeadline(selectedDate, calendar: oldCalendar)
+            if let preserved = date.date(in: store.countdownDay.calendar) { selectedDate = preserved }
+        }
+    }
+    private var selectedDeadline: ReminderDeadline { ReminderDeadline(selectedDate, calendar: store.countdownDay.calendar) }
+    private func finish() { if let close { close() } else { dismiss() } }
+    private func save() {
+        let deadline = enablesCountdown ? selectedDeadline : nil
+        let saved = item.map { store.edit($0.id, title: title, deadline: deadline) } ?? store.add(title, deadline: deadline)
+        if saved { finish() } else {
+            saveError = store.errorMessage ?? "无法保存待办，请重试。"
+            store.errorMessage = nil
+        }
+    }
 }
 
 extension Notification.Name {
