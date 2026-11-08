@@ -118,8 +118,12 @@ import Foundation
         let surface = WidgetSurface(store: store)
         surface.layoutSubtreeIfNeeded()
         assert(surface.grip.isHidden && !surface.addButton.isHidden)
-        assert(!surface.addButton.frame.intersects(surface.scroll.frame))
+        assert(surface.addButton.frame.intersects(surface.scroll.frame), "The add button floats over the list instead of reserving a footer")
         assert(!surface.addButton.frame.intersects(surface.grip.frame))
+        surface.setFrameSize(NSSize(width: 280, height: 240))
+        surface.layoutSubtreeIfNeeded()
+        let bottomClearance = surface.rows.bounds.maxY - surface.rows.subviews.last!.frame.maxY
+        assert(bottomClearance >= surface.addButton.frame.maxY - surface.scroll.frame.minY, "The last task must scroll clear of the floating button")
         var addCount = 0
         surface.onAdd = { addCount += 1 }
         surface.addButton.performClick(nil)
