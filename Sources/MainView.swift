@@ -305,8 +305,9 @@ private struct WidgetPreview: View {
                     Rectangle().fill(.primary.opacity(0.06)).frame(height: 0.5)
                 }
                 Spacer(minLength: 4)
-                Image(systemName: "plus").font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 22).background(.primary.opacity(0.08), in: Circle())
+                Image(systemName: "plus").font(.system(size: 9, weight: .semibold))
+                    .frame(width: 18, height: 18).background(.primary.opacity(0.08), in: Circle())
+                    .frame(width: 22, height: 22)
                     .frame(maxWidth: .infinity, alignment: .trailing).accessibilityHidden(true)
             }
             .padding(18).frame(width: 200, height: min(340, max(225, store.settings.height * 0.65)))
