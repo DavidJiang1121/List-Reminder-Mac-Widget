@@ -56,7 +56,8 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag="v$version"
           notes="docs/releases/$tag.md"
-          title="List Reminder $version — 简约桌面待办，放好就锁定"
+          subtitle=$(sed -n '1s/^# //p' "$notes")
+          title="List Reminder $version${subtitle:+ — $subtitle}"
           package="$RUNNER_TEMP/ListReminder-package"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft >/dev/null 2>&1; then
             draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
