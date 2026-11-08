@@ -7,6 +7,74 @@ struct Reminder: Codable, Identifiable, Equatable {
     var isCompleted = false
     var createdAt = Date()
     var completedAt: Date?
+    var deadline: ReminderDeadline?
+
+    func countdown(on day: ReminderDay) -> ReminderCountdown? {
+        isCompleted ? nil : deadline?.countdown(on: day)
+    }
+}
+
+// Store the chosen calendar date, so travelling does not shift the deadline.
+struct ReminderDeadline: Codable, Equatable {
+    let year: Int
+    let month: Int
+    let day: Int
+
+    init(_ date: Date, calendar: Calendar) {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        year = parts.year ?? 1
+        month = parts.month ?? 1
+        day = parts.day ?? 1
+    }
+
+    func date(in calendar: Calendar) -> Date? {
+        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)),
+              ReminderDeadline(date, calendar: calendar) == self else { return nil }
+        return calendar.startOfDay(for: date)
+    }
+
+    func countdown(on reference: ReminderDay) -> ReminderCountdown? {
+        // Both endpoints are civil dates; UTC arithmetic avoids shortened DST days.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        guard let target = date(in: calendar), let today = reference.date.date(in: calendar),
+              let days = calendar.dateComponents([.day], from: today, to: target).day else { return nil }
+        return ReminderCountdown(days: days)
+    }
+}
+
+struct ReminderDay: Equatable {
+    let date: ReminderDeadline
+    let timeZone: TimeZone
+
+    init(now: Date = .now, timeZone: TimeZone = .current) {
+        self.timeZone = timeZone
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        date = ReminderDeadline(now, calendar: calendar)
+    }
+
+    var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar
+    }
+}
+
+struct ReminderCountdown: Equatable {
+    enum Tone { case overdue, soon, planned }
+    let days: Int
+    var tone: Tone {
+        if days < 0 { return .overdue }
+        return days <= 3 ? .soon : .planned
+    }
+    var label: String {
+        days == 0 ? "今天截止" : "\(days)d"
+    }
+    var spokenLabel: String {
+        if days < 0 { return "超期 \(days.magnitude) 天" }
+        return days == 0 ? label : "剩 \(days) 天"
+    }
 }
 
 struct WidgetSettings: Codable, Equatable {
@@ -54,8 +122,10 @@ private struct SavedState: Codable {
     @Published private(set) var settings = WidgetSettings()
     @Published var errorMessage: String?
     @Published private(set) var undoTitle: String?
+    @Published private(set) var countdownDay = ReminderDay()
     private var undoSnapshot: [Reminder]?
     private var loadBlocked = false
+    var onCompletion: (() -> Void)?
     let fileURL: URL
 
     var pending: [Reminder] { reminders.filter { !$0.isCompleted } }
@@ -100,18 +170,24 @@ private struct SavedState: Codable {
         }
     }
 
-    @discardableResult func add(_ title: String) -> Bool {
-        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, cleaned.count <= 1000 else { return false }
-        return change(reminders + [Reminder(title: cleaned)], label: "添加待办")
+    func refreshDay(now: Date = .now, timeZone: TimeZone = .current) {
+        let day = ReminderDay(now: now, timeZone: timeZone)
+        if countdownDay != day { countdownDay = day }
     }
 
-    @discardableResult func rename(_ id: UUID, title: String) -> Bool {
+    @discardableResult func add(_ title: String, deadline: ReminderDeadline? = nil) -> Bool {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, cleaned.count <= 1000 else { return false }
+        return change(reminders + [Reminder(title: cleaned, deadline: deadline)], label: "添加待办")
+    }
+
+    @discardableResult func edit(_ id: UUID, title: String, deadline: ReminderDeadline?) -> Bool {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty, cleaned.count <= 1000, let index = reminders.firstIndex(where: { $0.id == id }) else { return false }
-        if reminders[index].title == cleaned { return true }
+        if reminders[index].title == cleaned && reminders[index].deadline == deadline { return true }
         var items = reminders
         items[index].title = cleaned
+        items[index].deadline = deadline
         return change(items, label: "编辑待办")
     }
 
@@ -120,7 +196,10 @@ private struct SavedState: Codable {
         var items = reminders
         items[index].isCompleted.toggle()
         items[index].completedAt = items[index].isCompleted ? Date() : nil
-        _ = change(items, label: items[index].isCompleted ? "完成待办" : "恢复待办")
+        let finished = items[index].isCompleted
+        if change(items, label: finished ? "完成待办" : "恢复待办"), finished {
+            onCompletion?()
+        }
     }
 
     func remove(_ id: UUID) { _ = change(reminders.filter { $0.id != id }, label: "删除待办") }
