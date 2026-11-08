@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="112" alt="List Reminder icon">
+  <img src="assets/icon.svg" width="112" alt="List Reminder icon">
 </p>
 
 <h1 align="center">List Reminder</h1>
