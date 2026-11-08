@@ -15,6 +15,25 @@ final class WidgetRows: NSView {
     override var isFlipped: Bool { true }
 }
 
+extension ReminderCountdown {
+    var color: NSColor {
+        NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            switch tone {
+            case .overdue:
+                return dark ? NSColor(srgbRed: 1, green: 0.66, blue: 0.69, alpha: 1)
+                    : NSColor(srgbRed: 0.65, green: 0.12, blue: 0.21, alpha: 1)
+            case .soon:
+                return dark ? NSColor(srgbRed: 1, green: 0.77, blue: 0.52, alpha: 1)
+                    : NSColor(srgbRed: 0.57, green: 0.27, blue: 0.07, alpha: 1)
+            case .planned:
+                return dark ? NSColor(srgbRed: 0.61, green: 0.90, blue: 0.72, alpha: 1)
+                    : NSColor(srgbRed: 0.12, green: 0.37, blue: 0.25, alpha: 1)
+            }
+        }
+    }
+}
+
 final class WidgetHeader: NSView {
     var isPositionLocked = false
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -31,15 +50,17 @@ final class WidgetHeader: NSView {
 
 final class WidgetRow: ClickView {
     let item: Reminder
+    let countdown: ReminderCountdown?
     let action: () -> Void
     var hovered = false
     var tracking: NSTrackingArea?
-    init(item: Reminder, action: @escaping () -> Void) {
+    init(item: Reminder, day: ReminderDay = ReminderDay(), action: @escaping () -> Void) {
         self.item = item; self.action = action
+        countdown = item.countdown(on: day)
         super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel(item.title)
+        setAccessibilityLabel(countdown.map { "\(item.title)，\($0.spokenLabel)" } ?? item.title)
         setAccessibilityHelp("双击完成待办；也可使用辅助功能操作。")
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -60,13 +81,36 @@ final class WidgetRow: ClickView {
             NSBezierPath(roundedRect: bounds.insetBy(dx: 10, dy: 2), xRadius: 10, yRadius: 10).fill()
         }
         NSColor.labelColor.withAlphaComponent(0.3).setStroke()
-        let circle = NSBezierPath(ovalIn: NSRect(x: 24, y: 18, width: 17, height: 17))
+        let circle = NSBezierPath(ovalIn: NSRect(x: 24, y: (bounds.height - 17) / 2, width: 17, height: 17))
         circle.lineWidth = 1.4; circle.stroke()
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
-        (item.title as NSString).draw(in: NSRect(x: 53, y: 17, width: bounds.width - 76, height: 40), withAttributes: [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
+        var titleRight = bounds.width - 24
+        if let countdown {
+            let text = NSAttributedString(string: countdown.label, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold), .foregroundColor: countdown.color])
+            let size = text.size()
+            let badge = NSRect(x: titleRight - size.width - 14, y: (bounds.height - 22) / 2, width: size.width + 14, height: 22)
+            countdown.color.withAlphaComponent(0.12).setFill()
+            NSBezierPath(roundedRect: badge, xRadius: 11, yRadius: 11).fill()
+            text.draw(at: NSPoint(x: badge.minX + 7, y: (bounds.height - size.height) / 2))
+            titleRight = badge.minX - 9
+        }
+        let title = NSAttributedString(string: item.title, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
+        title.draw(with: NSRect(x: 53, y: (bounds.height - 20) / 2, width: max(0, titleRight - 53), height: 20), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         NSColor.separatorColor.withAlphaComponent(0.32).setFill()
         NSRect(x: 53, y: bounds.height - 1, width: bounds.width - 78, height: 0.5).fill()
+    }
+}
+
+final class WidgetAddButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var needsPanelToBecomeKey: Bool { false }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.labelColor.withAlphaComponent(cell?.isHighlighted == true ? 0.16 : 0.08).setFill()
+        NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+        super.draw(dirtyRect)
     }
 }
 
@@ -106,6 +150,8 @@ final class WidgetSurface: NSView {
     let rows = WidgetRows()
     let emptyTitle = NSTextField(labelWithString: "")
     let grip = ResizeGrip()
+    let addButton = WidgetAddButton(frame: .zero)
+    var onAdd: (() -> Void)?
     private var subscription: AnyCancellable?
     let store: ReminderStore
 
@@ -129,6 +175,14 @@ final class WidgetSurface: NSView {
         emptyTitle.alignment = .center
         addSubview(emptyTitle)
         addSubview(grip)
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 14, weight: .semibold))
+        addButton.imagePosition = .imageOnly
+        addButton.isBordered = false
+        addButton.contentTintColor = .labelColor
+        addButton.target = self
+        addButton.action = #selector(requestAdd)
+        addButton.setAccessibilityLabel("添加待办")
+        addSubview(addButton)
         subscription = store.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.reload() }
         }
@@ -136,6 +190,7 @@ final class WidgetSurface: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    @objc private func requestAdd() { onAdd?() }
 
     func reload() {
         let settings = store.settings
@@ -146,7 +201,7 @@ final class WidgetSurface: NSView {
         grip.isHidden = settings.isPositionLocked
         rows.subviews.forEach { $0.removeFromSuperview() }
         for item in store.pending {
-            rows.addSubview(WidgetRow(item: item) { [weak store] in store?.toggle(item.id) })
+            rows.addSubview(WidgetRow(item: item, day: store.countdownDay) { [weak store] in store?.toggle(item.id) })
         }
         let count = store.pending.count
         emptyTitle.stringValue = "暂无待办"
@@ -161,14 +216,15 @@ final class WidgetSurface: NSView {
         let w = bounds.width, h = bounds.height
         glass.frame = bounds
         header.frame = NSRect(x: 0, y: h - 73, width: w, height: 73)
-        scroll.frame = NSRect(x: 0, y: 23, width: w, height: max(80, h - 96))
-        let rowHeight: CGFloat = 61
+        scroll.frame = NSRect(x: 0, y: 55, width: w, height: max(0, h - 128))
+        let rowHeight: CGFloat = 54
         rows.frame = NSRect(x: 0, y: 0, width: w, height: max(scroll.contentSize.height, CGFloat(rows.subviews.count) * rowHeight))
         for (index, row) in rows.subviews.enumerated() {
             row.frame = NSRect(x: 0, y: CGFloat(index) * rowHeight, width: w, height: rowHeight)
         }
         emptyTitle.frame = NSRect(x: 18, y: h * 0.5, width: w - 36, height: 28)
-        grip.frame = NSRect(x: w - 30, y: 7, width: 21, height: 21)
+        addButton.frame = NSRect(x: w - 59, y: 13, width: 34, height: 34)
+        grip.frame = NSRect(x: w - 22, y: 3, width: 17, height: 17)
     }
 }
 
