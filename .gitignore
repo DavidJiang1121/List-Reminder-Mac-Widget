@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+build/
+dist/
+*.app/
+*.zip
+.env
+.env.*
+!.env.example
+reminders.json
+reminders-unreadable-*.json
+*.xcuserstate
+xcuserdata/
