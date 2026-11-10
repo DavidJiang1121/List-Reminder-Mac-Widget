@@ -91,7 +91,11 @@ import Foundation
         assert(!failing.add("不能静默丢失"))
         assert(failing.reminders.isEmpty && failing.errorMessage != nil)
         try verifyCountdowns(at: root.appendingPathComponent("countdowns"))
-        print("PASS: add/trim/limits, edit, single vs double click, complete/restore, undo/delete/clear, persistence, settings bounds, corruption backup, failed-write rollback, legacy migration, lock/resize guards, calendar deadlines, DST and time-zone changes, urgency rollover, widget plus while locked, completion-only celebration")
+        try verifyDailyAndAchievements(at: root.appendingPathComponent("achievements"))
+        if let existingDirectory = CommandLine.arguments.dropFirst().first {
+            try verifyExistingData(at: URL(fileURLWithPath: existingDirectory), using: root.appendingPathComponent("migration"))
+        }
+        print("PASS: editing and double-click completion, persistence and undo, settings, corrupt/blocked data, calendar and DST, widget add/lock, legacy history migration, recurrence, daily badge, clear/delete history retention, and celebration routing")
     }
 
     @MainActor private static func verifyCountdowns(at root: URL) throws {
@@ -144,20 +148,91 @@ import Foundation
         assert(deadline.countdown(on: ReminderDay(now: instant, timeZone: pacific))?.days == 1)
         assert(deadline.countdown(on: ReminderDay(now: instant, timeZone: TimeZone(identifier: "Asia/Shanghai")!))?.days == 0)
         var celebrations = 0
-        store.onCompletion = { celebrations += 1 }
-        store.toggle(item.id)
+        store.onCompletion = { _ in celebrations += 1 }
+        store.toggle(item.id, now: march(8), timeZone: pacific)
         assert(celebrations == 1)
         assert(store.completed[0].deadline == deadline && store.completed[0].countdown(on: store.countdownDay) == nil)
         store.undo()
         assert(celebrations == 1)
         assert(store.pending[1].countdown(on: store.countdownDay)?.days == 2)
-        store.toggle(item.id)
+        store.toggle(item.id, now: march(8), timeZone: pacific)
         assert(celebrations == 2)
-        store.toggle(item.id)
+        store.toggle(item.id, now: march(8), timeZone: pacific)
         assert(celebrations == 2 && store.pending[1].deadline == deadline)
         assert(store.edit(item.id, title: item.title, deadline: nil))
         assert(ReminderStore(directory: root).pending[1].deadline == nil)
         store.undo()
         assert(store.pending[1].deadline == deadline)
+    }
+
+    @MainActor private static func verifyDailyAndAchievements(at root: URL) throws {
+        let timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let dayOne = calendar.date(from: DateComponents(year: 2026, month: 11, day: 10, hour: 23, minute: 59))!
+        let dayTwo = dayOne.addingTimeInterval(120)
+        let dayThree = calendar.date(byAdding: .day, value: 1, to: dayTwo)!
+        let store = ReminderStore(directory: root)
+        store.refreshDay(now: dayOne, timeZone: timeZone)
+        let firstKey = store.countdownDay.date
+        let target = ReminderDeadline(calendar.date(byAdding: .day, value: 5, to: dayOne)!, calendar: calendar)
+        assert(store.add("作业", deadline: target, category: .homework))
+        assert(store.add("每天读书", deadline: target, daily: true))
+        let homework = store.pending[0], daily = store.pending[1]
+        assert(homework.category == .homework && homework.badge(on: store.countdownDay) == .deadline(.init(days: 5)))
+        assert(daily.deadline == nil && daily.badge(on: store.countdownDay) == .daily)
+        let surface = WidgetSurface(store: store)
+        assert((surface.rows.subviews[1] as? WidgetRow)?.badge?.label == "每日")
+        var celebrations: [ReminderStore.Completion] = []
+        store.onCompletion = { celebrations.append($0) }
+        store.toggle(homework.id, now: dayOne, timeZone: timeZone)
+        assert(store.pending.map(\.id) == [daily.id] && celebrations == [.task])
+        store.toggle(daily.id, now: dayOne, timeZone: timeZone)
+        assert(store.pending.isEmpty && store.completed.count == 2 && store.completionCounts[firstKey] == 2)
+        assert(celebrations == [.task, .allTasks])
+        store.undo()
+        assert(store.pending.map(\.id) == [daily.id] && store.completionCounts[firstKey] == 1)
+        store.toggle(daily.id, now: dayOne, timeZone: timeZone)
+        store.clearCompleted()
+        assert(store.reminders.map(\.id) == [daily.id] && store.completionCounts[firstKey] == 2)
+
+        let restored = ReminderStore(directory: root)
+        restored.refreshDay(now: dayOne, timeZone: timeZone)
+        assert(restored.pending.isEmpty && restored.completed.first?.id == daily.id)
+        restored.refreshDay(now: dayTwo, timeZone: timeZone)
+        let secondKey = restored.countdownDay.date
+        assert(restored.pending.map(\.id) == [daily.id] && restored.completed.isEmpty)
+        restored.toggle(daily.id, now: dayTwo, timeZone: timeZone)
+        assert(restored.completionCounts == [firstKey: 2, secondKey: 1])
+        restored.toggle(daily.id, now: dayTwo, timeZone: timeZone)
+        assert(restored.completionCounts == [firstKey: 2] && restored.pending.map(\.id) == [daily.id])
+        restored.toggle(daily.id, now: dayTwo, timeZone: timeZone)
+        restored.refreshDay(now: dayThree, timeZone: timeZone)
+        assert(restored.pending.count == 1 && restored.reminders.count == 1 && restored.completionCounts[secondKey] == 1)
+        assert(restored.edit(daily.id, title: daily.title, deadline: target, category: .homework, daily: false))
+        assert(restored.pending[0].deadline == target && restored.pending[0].category == .homework)
+        restored.remove(daily.id)
+        assert(restored.pending.isEmpty && restored.completionCounts == [firstKey: 2, secondKey: 1])
+        assert(ReminderStore(directory: root).completionCounts == restored.completionCounts)
+    }
+
+    @MainActor private static func verifyExistingData(at input: URL, using copy: URL) throws {
+        let original = input.appendingPathComponent("reminders.json")
+        let bytes = try Data(contentsOf: original)
+        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
+        try bytes.write(to: copy.appendingPathComponent("reminders.json"))
+        let store = ReminderStore(directory: copy)
+        let originalItems = store.reminders
+        let originalSettings = store.settings
+        let originalHistory = store.completionHistory
+        let persisted = try Data(contentsOf: store.fileURL)
+        assert(store.errorMessage == nil && persisted == bytes)
+        assert(store.add("临时升级验证"))
+        let migrated = ReminderStore(directory: copy)
+        assert(Array(migrated.reminders.dropLast()) == originalItems)
+        assert(migrated.settings == originalSettings && migrated.completionHistory == originalHistory)
+        let unchanged = try Data(contentsOf: original)
+        assert(unchanged == bytes)
+        print("PASS: existing data copied and migrated with all \(originalItems.count) task records, \(originalHistory.count) dated completions and original widget settings; real data file unchanged")
     }
 }

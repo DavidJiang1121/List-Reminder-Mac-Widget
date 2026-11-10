@@ -1,6 +1,12 @@
 import Foundation
 import Combine
 
+enum ReminderCategory: String, Codable, CaseIterable, Identifiable {
+    case general = "普通"
+    case homework = "作业"
+    var id: Self { self }
+}
+
 struct Reminder: Codable, Identifiable, Equatable {
     var id = UUID()
     var title: String
@@ -8,14 +14,41 @@ struct Reminder: Codable, Identifiable, Equatable {
     var createdAt = Date()
     var completedAt: Date?
     var deadline: ReminderDeadline?
+    // Missing values in version 1 are ordinary, one-time tasks.
+    var storedCategory: ReminderCategory?
+    var repeatsDaily: Bool?
+    var category: ReminderCategory { storedCategory ?? .general }
+    var isDaily: Bool { repeatsDaily == true }
 
     func countdown(on day: ReminderDay) -> ReminderCountdown? {
-        isCompleted ? nil : deadline?.countdown(on: day)
+        isCompleted || isDaily ? nil : deadline?.countdown(on: day)
+    }
+
+    func badge(on day: ReminderDay) -> ReminderBadge? {
+        if isDaily { return .daily }
+        return countdown(on: day).map(ReminderBadge.deadline)
+    }
+
+    func accessibilityTitle(on day: ReminderDay) -> String {
+        [title, category == .homework ? category.rawValue : nil, badge(on: day)?.spokenLabel]
+            .compactMap { $0 }.joined(separator: "，")
+    }
+}
+
+enum ReminderBadge: Equatable {
+    case daily
+    case deadline(ReminderCountdown)
+
+    var label: String {
+        switch self { case .daily: return "每日"; case .deadline(let countdown): return countdown.label }
+    }
+    var spokenLabel: String {
+        switch self { case .daily: return "每日重复"; case .deadline(let countdown): return countdown.spokenLabel }
     }
 }
 
 // Store the chosen calendar date, so travelling does not shift the deadline.
-struct ReminderDeadline: Codable, Equatable {
+struct ReminderDeadline: Codable, Hashable {
     let year: Int
     let month: Int
     let day: Int
@@ -112,24 +145,58 @@ struct WidgetSettings: Codable, Equatable {
 }
 
 private struct SavedState: Codable {
-    var version = 1
+    var version = 2
     var reminders: [Reminder] = []
     var settings = WidgetSettings()
+    var completionHistory: [CompletionRecord]?
+}
+
+struct CompletionRecord: Codable, Equatable {
+    let reminderID: UUID
+    let completedAt: Date
+    let day: ReminderDeadline
 }
 
 @MainActor final class ReminderStore: ObservableObject {
+    enum Completion { case task, allTasks }
+    private struct UndoSnapshot {
+        let reminders: [Reminder]
+        let history: [CompletionRecord]
+    }
     @Published private(set) var reminders: [Reminder] = []
     @Published private(set) var settings = WidgetSettings()
+    @Published private(set) var completionHistory: [CompletionRecord] = []
     @Published var errorMessage: String?
     @Published private(set) var undoTitle: String?
     @Published private(set) var countdownDay = ReminderDay()
-    private var undoSnapshot: [Reminder]?
+    private var undoSnapshot: UndoSnapshot?
     private var loadBlocked = false
-    var onCompletion: (() -> Void)?
+    var onCompletion: ((Completion) -> Void)?
     let fileURL: URL
 
-    var pending: [Reminder] { reminders.filter { !$0.isCompleted } }
-    var completed: [Reminder] { reminders.filter(\.isCompleted).sorted { ($0.completedAt ?? $0.createdAt) > ($1.completedAt ?? $1.createdAt) } }
+    private var dailyCompletions: [UUID: Date] {
+        completionHistory.reduce(into: [:]) { dates, entry in
+            if entry.day == countdownDay.date { dates[entry.reminderID] = entry.completedAt }
+        }
+    }
+    var pending: [Reminder] {
+        let daily = dailyCompletions
+        return reminders.filter { $0.isDaily ? daily[$0.id] == nil : !$0.isCompleted }
+    }
+    var completed: [Reminder] {
+        let daily = dailyCompletions
+        return reminders.compactMap { item -> Reminder? in
+            guard item.isDaily else { return item.isCompleted ? item : nil }
+            guard let date = daily[item.id] else { return nil }
+            var occurrence = item
+            occurrence.isCompleted = true
+            occurrence.completedAt = date
+            return occurrence
+        }.sorted { ($0.completedAt ?? $0.createdAt) > ($1.completedAt ?? $1.createdAt) }
+    }
+    var completionCounts: [ReminderDeadline: Int] {
+        completionHistory.reduce(into: [:]) { $0[$1.day, default: 0] += 1 }
+    }
 
     init(directory: URL? = nil) {
         let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("List Reminder", isDirectory: true)
@@ -137,10 +204,18 @@ private struct SavedState: Codable {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         do {
             let saved = try JSONDecoder().decode(SavedState.self, from: Data(contentsOf: fileURL))
-            guard saved.version == 1 else { throw CocoaError(.coderReadCorrupt) }
+            guard saved.version == 1 || saved.version == 2 else {
+                loadBlocked = true
+                errorMessage = "待办文件由其他版本创建，已保留原文件。"
+                return
+            }
             reminders = saved.reminders
             settings = saved.settings
             settings.normalize()
+            completionHistory = saved.completionHistory ?? saved.reminders.compactMap { item in
+                guard item.isCompleted, let time = item.completedAt else { return nil }
+                return CompletionRecord(reminderID: item.id, completedAt: time, day: ReminderDay(now: time).date)
+            }
         } catch {
             let backup = root.appendingPathComponent("reminders-unreadable-\(UUID().uuidString).json")
             do {
@@ -153,15 +228,16 @@ private struct SavedState: Codable {
         }
     }
 
-    @discardableResult private func commit(_ items: [Reminder], settings nextSettings: WidgetSettings) -> Bool {
-        guard !loadBlocked else { errorMessage = "原数据无法备份，已停止写入以保留原文件。请检查存储文件夹权限后重新打开应用。"; return false }
+    @discardableResult private func commit(_ items: [Reminder], history: [CompletionRecord], settings nextSettings: WidgetSettings) -> Bool {
+        guard !loadBlocked else { errorMessage = "已停止写入以保留原有待办文件。"; return false }
         do {
             try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(SavedState(reminders: items, settings: nextSettings))
+            let data = try encoder.encode(SavedState(reminders: items, settings: nextSettings, completionHistory: history))
             try data.write(to: fileURL, options: .atomic)
             if reminders != items { reminders = items }
+            if completionHistory != history { completionHistory = history }
             if settings != nextSettings { settings = nextSettings }
             return true
         } catch {
@@ -175,46 +251,73 @@ private struct SavedState: Codable {
         if countdownDay != day { countdownDay = day }
     }
 
-    @discardableResult func add(_ title: String, deadline: ReminderDeadline? = nil) -> Bool {
+    @discardableResult func add(_ title: String, deadline: ReminderDeadline? = nil, category: ReminderCategory = .general, daily: Bool = false) -> Bool {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty, cleaned.count <= 1000 else { return false }
-        return change(reminders + [Reminder(title: cleaned, deadline: deadline)], label: "添加待办")
+        let item = Reminder(title: cleaned, deadline: daily ? nil : deadline, storedCategory: category == .general ? nil : category, repeatsDaily: daily ? true : nil)
+        return change(reminders + [item], history: completionHistory, label: "添加待办")
     }
 
-    @discardableResult func edit(_ id: UUID, title: String, deadline: ReminderDeadline?) -> Bool {
+    @discardableResult func edit(_ id: UUID, title: String, deadline: ReminderDeadline?, category: ReminderCategory? = nil, daily: Bool? = nil) -> Bool {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty, cleaned.count <= 1000, let index = reminders.firstIndex(where: { $0.id == id }) else { return false }
-        if reminders[index].title == cleaned && reminders[index].deadline == deadline { return true }
         var items = reminders
+        let wasDaily = items[index].isDaily
+        let repeats = daily ?? wasDaily
         items[index].title = cleaned
-        items[index].deadline = deadline
-        return change(items, label: "编辑待办")
+        items[index].deadline = repeats ? nil : deadline
+        if let category { items[index].storedCategory = category == .general ? nil : category }
+        items[index].repeatsDaily = repeats ? true : nil
+        if repeats {
+            items[index].isCompleted = false
+            items[index].completedAt = nil
+        } else if wasDaily {
+            items[index].completedAt = dailyCompletions[id]
+            items[index].isCompleted = items[index].completedAt != nil
+        }
+        if items == reminders { return true }
+        return change(items, history: completionHistory, label: "编辑待办")
     }
 
-    func toggle(_ id: UUID) {
+    func toggle(_ id: UUID, now: Date = .now, timeZone: TimeZone = .current) {
         guard let index = reminders.firstIndex(where: { $0.id == id }) else { return }
+        refreshDay(now: now, timeZone: timeZone)
         var items = reminders
-        items[index].isCompleted.toggle()
-        items[index].completedAt = items[index].isCompleted ? Date() : nil
-        let finished = items[index].isCompleted
-        if change(items, label: finished ? "完成待办" : "恢复待办"), finished {
-            onCompletion?()
+        var history = completionHistory
+        let finished: Bool
+        if items[index].isDaily {
+            finished = !history.contains { $0.reminderID == id && $0.day == countdownDay.date }
+            if !finished { history.removeAll { $0.reminderID == id && $0.day == countdownDay.date } }
+        } else {
+            finished = !items[index].isCompleted
+            if let time = items[index].completedAt, !finished {
+                history.removeAll { $0.reminderID == id && $0.completedAt == time }
+            }
+            items[index].isCompleted = finished
+            items[index].completedAt = finished ? now : nil
+        }
+        if finished {
+            history.append(CompletionRecord(reminderID: id, completedAt: now, day: countdownDay.date))
+        }
+        if change(items, history: history, label: finished ? "完成待办" : "恢复待办"), finished {
+            onCompletion?(pending.isEmpty ? .allTasks : .task)
         }
     }
 
-    func remove(_ id: UUID) { _ = change(reminders.filter { $0.id != id }, label: "删除待办") }
-    func clearCompleted() { _ = change(pending, label: "清除已完成") }
+    func remove(_ id: UUID) { _ = change(reminders.filter { $0.id != id }, history: completionHistory, label: "删除待办") }
+    func clearCompleted() { _ = change(reminders.filter { $0.isDaily || !$0.isCompleted }, history: completionHistory, label: "清除已完成") }
 
-    @discardableResult private func change(_ items: [Reminder], label: String) -> Bool {
-        let previous = reminders
-        guard items != previous, commit(items, settings: settings) else { return false }
+    @discardableResult private func change(_ items: [Reminder], history: [CompletionRecord], label: String) -> Bool {
+        let previous = UndoSnapshot(reminders: reminders, history: completionHistory)
+        guard items != previous.reminders || history != previous.history,
+              commit(items, history: history, settings: settings) else { return false }
         undoSnapshot = previous
         undoTitle = label
         return true
     }
 
     func undo() {
-        guard let previous = undoSnapshot, commit(previous, settings: settings) else { return }
+        guard let previous = undoSnapshot, commit(previous.reminders, history: previous.history, settings: settings) else { return }
         undoSnapshot = nil
         undoTitle = nil
     }
@@ -224,6 +327,6 @@ private struct SavedState: Codable {
         update(&next)
         next.normalize()
         guard next != settings else { return }
-        _ = commit(reminders, settings: next)
+        _ = commit(reminders, history: completionHistory, settings: next)
     }
 }

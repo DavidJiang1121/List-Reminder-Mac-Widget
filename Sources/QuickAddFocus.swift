@@ -63,7 +63,7 @@ private final class FocusBackdropPanel: NSPanel {
     }
 }
 
-private final class FocusWaveView: NSView {
+class FocusWaveView: NSView {
     private struct Star {
         let x: CGFloat
         let y: CGFloat
@@ -76,6 +76,14 @@ private final class FocusWaveView: NSView {
     private let refocus: () -> Void
     private let stars: [Star]
     private let glow: CGGradient?
+    private static let nebulaGlows: [CGGradient] = [
+        NSColor(srgbRed: 0.46, green: 0.19, blue: 0.67, alpha: 0.46),
+        NSColor(srgbRed: 0.19, green: 0.35, blue: 0.64, alpha: 0.38),
+        NSColor(srgbRed: 0.58, green: 0.24, blue: 0.45, alpha: 0.24)
+    ].compactMap { tint in
+        CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                   colors: [tint.cgColor, tint.withAlphaComponent(0).cgColor] as CFArray, locations: [0, 1])
+    }
     var elapsed: Double = 0 { didSet { needsDisplay = true } }
 
     init(frame: NSRect, refocus: @escaping () -> Void) {
@@ -103,18 +111,35 @@ private final class FocusWaveView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
-        let time = CGFloat(elapsed)
-        let fade = min(1, time / 0.28)
+        drawField(in: context, time: CGFloat(elapsed), fade: min(1, CGFloat(elapsed) / 0.28))
+    }
+
+    func drawField(in context: CGContext, time: CGFloat, fade: CGFloat, nebula: Bool = false) {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let depth = max(1, min(bounds.width, bounds.height))
         context.saveGState()
         defer { context.restoreGState() }
         context.clear(bounds)
-        context.setFillColor(NSColor(srgbRed: 0.032, green: 0.043, blue: 0.095, alpha: 0.77 * fade).cgColor)
+        context.setFillColor(NSColor(srgbRed: 0.032, green: 0.043, blue: 0.095, alpha: (nebula ? 0.89 : 0.77) * fade).cgColor)
         context.fill(bounds)
         if let glow {
             context.setAlpha(fade)
             context.drawRadialGradient(glow, startCenter: center, startRadius: 0, endCenter: center, endRadius: depth * 0.69, options: [])
+        }
+        if nebula {
+            for (index, gradient) in Self.nebulaGlows.enumerated() {
+                let offset = CGFloat(index)
+                let x = bounds.width * (0.23 + 0.25 * offset + 0.03 * sin(time * 0.38 + offset))
+                let y = bounds.height * (0.68 - 0.16 * offset + 0.04 * cos(time * 0.42 + offset))
+                context.saveGState()
+                context.translateBy(x: x, y: y)
+                context.rotate(by: -0.30)
+                context.scaleBy(x: 1.65, y: 0.72)
+                context.setAlpha(fade)
+                context.drawRadialGradient(gradient, startCenter: .zero, startRadius: 0,
+                                           endCenter: .zero, endRadius: depth * 0.55, options: [])
+                context.restoreGState()
+            }
         }
         drawWaves(in: context, around: center, depth: depth, time: time, fade: fade)
         context.setLineCap(.round)
