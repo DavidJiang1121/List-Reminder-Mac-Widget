@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'solitarystar123/DavidJiang' && github.ref == 'refs/heads/main'
+    if: github.event.repository.id == 1448337229 && github.ref == 'refs/heads/main'
     runs-on: macos-26
     timeout-minutes: 15
     permissions:
