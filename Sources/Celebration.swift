@@ -5,15 +5,24 @@ private final class CelebrationPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+protocol CelebrationScene where Self: NSView {
+    var duration: Double { get }
+    var elapsed: Double { get set }
+}
+
 @MainActor final class CompletionCelebration {
     private var panel: CelebrationPanel?
     private var timer: Timer?
 
-    func show(on screen: NSScreen) {
+    func show(_ kind: ReminderStore.Completion, on screen: NSScreen) {
         dismiss()
-        let view = FireworkView(frame: NSRect(origin: .zero, size: screen.frame.size), reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        let frame = NSRect(origin: .zero, size: screen.frame.size)
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let view: NSView & CelebrationScene
+        if kind == .allTasks { view = ChampagneView(frame: frame, reduceMotion: reduceMotion) }
+        else { view = FireworkView(frame: frame, reduceMotion: reduceMotion) }
         let overlay = CelebrationPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        overlay.title = "完成了！！！"
+        overlay.title = kind == .allTasks ? "超级完成！！！" : "完成了！！！"
         overlay.contentView = view
         overlay.isOpaque = false
         overlay.backgroundColor = .clear
@@ -29,7 +38,7 @@ private final class CelebrationPanel: NSPanel {
         overlay.orderFrontRegardless()
 
         let began = ProcessInfo.processInfo.systemUptime
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self, weak view] _ in
+        let timer = Timer(timeInterval: 1.0 / (kind == .allTasks ? 30.0 : 60.0), repeats: true) { [weak self, weak view] _ in
             MainActor.assumeIsolated {
                 guard let self, let view else { return }
                 let elapsed = ProcessInfo.processInfo.systemUptime - began
@@ -49,7 +58,7 @@ private final class CelebrationPanel: NSPanel {
     }
 }
 
-final class FireworkView: NSView {
+final class FireworkView: NSView, CelebrationScene {
     private struct Spark {
         let direction: CGFloat
         let speed: CGFloat
@@ -70,7 +79,7 @@ final class FireworkView: NSView {
     var elapsed = 0.0 { didSet { needsDisplay = true } }
     private let bursts: [Burst]
 
-    init(frame: NSRect, reduceMotion: Bool) {
+    init(frame: NSRect, reduceMotion: Bool, grand: Bool = false) {
         self.reduceMotion = reduceMotion
         let palettes: [[NSColor]] = [
             [.init(srgbRed: 1, green: 0.75, blue: 0.32, alpha: 1), .init(srgbRed: 1, green: 0.89, blue: 0.56, alpha: 1), .white],
@@ -78,15 +87,24 @@ final class FireworkView: NSView {
             [.init(srgbRed: 0.46, green: 0.93, blue: 0.88, alpha: 1), .init(srgbRed: 0.67, green: 1, blue: 0.96, alpha: 1), .white],
             [.init(srgbRed: 0.75, green: 0.62, blue: 1, alpha: 1), .init(srgbRed: 0.9, green: 0.77, blue: 1, alpha: 1), .white]
         ]
-        let positions: [(CGFloat, CGFloat, Double, CGFloat)] = [
+        let standard: [(CGFloat, CGFloat, Double, CGFloat)] = [
             (0.17, 0.74, 0.29, 1.0), (0.81, 0.76, 0.38, 1.06), (0.47, 0.86, 0.56, 0.86),
             (0.10, 0.43, 0.73, 0.76), (0.91, 0.39, 0.82, 0.82), (0.28, 0.24, 0.96, 0.95),
             (0.71, 0.25, 1.12, 1.02), (0.27, 0.64, 1.34, 0.70), (0.74, 0.63, 1.43, 0.76)
         ]
+        let positions: [(CGFloat, CGFloat, Double, CGFloat)] = grand ? [
+            (0.18, 0.77, 0.72, 1.10), (0.81, 0.73, 0.96, 1.23), (0.50, 0.90, 1.13, 0.90),
+            (0.09, 0.40, 1.36, 0.80), (0.94, 0.39, 1.56, 0.92), (0.73, 0.24, 2.12, 1.02),
+            (0.32, 0.72, 2.72, 1.10), (0.89, 0.89, 3.15, 1.05), (0.14, 0.60, 3.81, 1.07),
+            (0.65, 0.84, 4.32, 1.08), (0.83, 0.32, 5.02, 1.18), (0.23, 0.83, 5.68, 1.18),
+            (0.10, 0.35, 6.32, 0.93), (0.62, 0.85, 7.10, 1.08), (0.86, 0.66, 7.23, 1.20),
+            (0.27, 0.64, 7.45, 1.14), (0.68, 0.24, 7.89, 1.02), (0.48, 0.88, 8.25, 1.00)
+        ] : standard
         bursts = positions.enumerated().map { index, position in
             let colors = palettes[index % palettes.count]
-            let sparks = (0..<46).map { index in
-                Spark(direction: (CGFloat(index) / 46) * 2 * .pi + .random(in: -0.065...0.065),
+            let count = grand ? 62 : 46
+            let sparks = (0..<count).map { index in
+                Spark(direction: (CGFloat(index) / CGFloat(count)) * 2 * .pi + .random(in: -0.065...0.065),
                       speed: .random(in: 0.38...1.0), size: .random(in: 1.1...2.6),
                       lifetime: .random(in: 0.95...1.48), color: colors[index % colors.count].cgColor)
             }
@@ -107,10 +125,17 @@ final class FireworkView: NSView {
         let opacity = CGFloat(enter * exit)
         context.setFillColor(NSColor(srgbRed: 0.025, green: 0.018, blue: 0.07, alpha: 0.42 * opacity).cgColor)
         context.fill(bounds)
+        drawBursts(in: context, time: elapsed, opacity: opacity, staticBurst: reduceMotion)
+        drawTitle(opacity: opacity)
+    }
+
+    func drawBursts(in context: CGContext, time: Double, opacity: CGFloat, staticBurst: Bool = false) {
+        context.saveGState()
+        defer { context.restoreGState() }
         context.setLineCap(.round)
         let radius = min(bounds.width, bounds.height) * 0.245
         for burst in bursts {
-            let age = reduceMotion ? 0.46 : elapsed - burst.start
+            let age = staticBurst ? 0.46 : time - burst.start
             let center = CGPoint(x: bounds.width * burst.x, y: bounds.height * burst.y)
             if age < 0 {
                 let progress = max(0, 1 + age / 0.30)
@@ -145,8 +170,6 @@ final class FireworkView: NSView {
                 context.fillEllipse(in: CGRect(x: head.x - spark.size, y: head.y - spark.size, width: spark.size * 2, height: spark.size * 2))
             }
         }
-        context.setAlpha(1)
-        drawTitle(opacity: opacity)
     }
 
     private func drawTitle(opacity: CGFloat) {

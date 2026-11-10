@@ -32,7 +32,7 @@ private final class QuickAddPanel: NSPanel {
         store = ReminderStore(directory: testDirectory)
         widget = WidgetController(store: store)
         widget.surface.onAdd = { [weak self] in self?.showQuickAdd() }
-        store.onCompletion = { [weak self] in self?.celebrateCompletion() }
+        store.onCompletion = { [weak self] kind in self?.celebrateCompletion(kind) }
         startCountdownClock()
         NotificationCenter.default.addObserver(self, selector: #selector(recenterQuickAdd), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         configureMenu()
@@ -54,10 +54,10 @@ private final class QuickAddPanel: NSPanel {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showMain(); return true }
     func applicationWillTerminate(_ notification: Notification) { dayTimer?.invalidate(); celebration.dismiss(); quickAddFocus.dismiss(animated: false); widget?.saveFrame() }
 
-    private func celebrateCompletion() {
+    private func celebrateCompletion(_ kind: ReminderStore.Completion) {
         let cursor = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(cursor) } ?? NSApp.keyWindow?.screen ?? widget.panel.screen ?? NSScreen.main
-        if let screen { celebration.show(on: screen) }
+        if let screen { celebration.show(kind, on: screen) }
     }
 
     @objc func showMain() { quickAddPanel?.close(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
@@ -82,7 +82,13 @@ private final class QuickAddPanel: NSPanel {
         panel.isMovable = false
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient, .ignoresCycle]
         panel.appearance = widget.surface.appearance
-        let editor = NSHostingView(rootView: ReminderEditor(store: store, close: { [weak panel] in panel?.close() }))
+        let editor = NSHostingView(rootView: ReminderEditor(store: store, close: { [weak panel] in panel?.close() }, resize: { [weak self, weak panel] height in
+            DispatchQueue.main.async {
+                guard let self, let panel, panel === self.quickAddPanel,
+                      abs(panel.contentLayoutRect.height - height) > 0.5 else { return }
+                panel.setContentSize(NSSize(width: 390, height: height))
+            }
+        }))
         panel.contentView = editor
         panel.setContentSize(editor.fittingSize)
         let pointer = NSEvent.mouseLocation

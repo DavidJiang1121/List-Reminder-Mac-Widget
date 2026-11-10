@@ -34,6 +34,19 @@ extension ReminderCountdown {
     }
 }
 
+enum DailyPalette {
+    static let pink = NSColor(srgbRed: 1.0, green: 0.66, blue: 0.81, alpha: 1)
+    static let yellow = NSColor(srgbRed: 1.0, green: 0.88, blue: 0.49, alpha: 1)
+    static let ink = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 1, green: 0.91, blue: 0.78, alpha: 1)
+            : NSColor(srgbRed: 0.42, green: 0.22, blue: 0.31, alpha: 1)
+    }
+    static let ringGradient = NSGradient(starting: pink, ending: yellow)!
+    static let badgeOpacity = 0.27
+    static let badgeGradient = NSGradient(starting: pink.withAlphaComponent(badgeOpacity), ending: yellow.withAlphaComponent(badgeOpacity))!
+}
+
 final class WidgetHeader: NSView {
     var isPositionLocked = false
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -50,17 +63,21 @@ final class WidgetHeader: NSView {
 
 final class WidgetRow: ClickView {
     let item: Reminder
-    let countdown: ReminderCountdown?
+    let badge: ReminderBadge?
+    var countdown: ReminderCountdown? {
+        if case .deadline(let value) = badge { return value }
+        return nil
+    }
     let action: () -> Void
     var hovered = false
     var tracking: NSTrackingArea?
     init(item: Reminder, day: ReminderDay = ReminderDay(), action: @escaping () -> Void) {
         self.item = item; self.action = action
-        countdown = item.countdown(on: day)
+        badge = item.badge(on: day)
         super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel(countdown.map { "\(item.title)，\($0.spokenLabel)" } ?? item.title)
+        setAccessibilityLabel(item.accessibilityTitle(on: day))
         setAccessibilityHelp("双击完成待办；也可使用辅助功能操作。")
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -80,20 +97,32 @@ final class WidgetRow: ClickView {
             NSColor.labelColor.withAlphaComponent(0.055).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 10, dy: 2), xRadius: 10, yRadius: 10).fill()
         }
-        NSColor.labelColor.withAlphaComponent(0.3).setStroke()
-        let circle = NSBezierPath(ovalIn: NSRect(x: 24, y: (bounds.height - 17) / 2, width: 17, height: 17))
-        circle.lineWidth = 1.4; circle.stroke()
+        let ring = NSRect(x: 24, y: (bounds.height - 17) / 2, width: 17, height: 17)
+        if item.category == .homework, badge == .daily {
+            let outline = NSBezierPath(ovalIn: ring)
+            outline.appendOval(in: ring.insetBy(dx: 1.8, dy: 1.8))
+            outline.windingRule = .evenOdd
+            DailyPalette.ringGradient.draw(in: outline, angle: 0)
+        } else {
+            let color = item.category == .homework ? countdown?.color : nil
+            (color ?? NSColor.labelColor.withAlphaComponent(0.3)).setStroke()
+            let circle = NSBezierPath(ovalIn: ring)
+            circle.lineWidth = color == nil ? 1.4 : 1.8
+            circle.stroke()
+        }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         var titleRight = bounds.width - 24
-        if let countdown {
-            let text = NSAttributedString(string: countdown.label, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold), .foregroundColor: countdown.color])
+        if let badge {
+            let color = countdown?.color ?? DailyPalette.ink
+            let text = NSAttributedString(string: badge.label, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold), .foregroundColor: color])
             let size = text.size()
-            let badge = NSRect(x: titleRight - size.width - 14, y: (bounds.height - 22) / 2, width: size.width + 14, height: 22)
-            countdown.color.withAlphaComponent(0.12).setFill()
-            NSBezierPath(roundedRect: badge, xRadius: 11, yRadius: 11).fill()
-            text.draw(at: NSPoint(x: badge.minX + 7, y: (bounds.height - size.height) / 2))
-            titleRight = badge.minX - 9
+            let capsule = NSRect(x: titleRight - size.width - 14, y: (bounds.height - 22) / 2, width: size.width + 14, height: 22)
+            let path = NSBezierPath(roundedRect: capsule, xRadius: 11, yRadius: 11)
+            if badge == .daily { DailyPalette.badgeGradient.draw(in: path, angle: 0) }
+            else { color.withAlphaComponent(0.12).setFill(); path.fill() }
+            text.draw(at: NSPoint(x: capsule.minX + 7, y: (bounds.height - size.height) / 2))
+            titleRight = capsule.minX - 9
         }
         let title = NSAttributedString(string: item.title, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
         title.draw(with: NSRect(x: 53, y: (bounds.height - 20) / 2, width: max(0, titleRight - 53), height: 20), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
@@ -207,10 +236,11 @@ final class WidgetSurface: NSView {
         grip.isPositionLocked = settings.isPositionLocked
         grip.isHidden = settings.isPositionLocked
         rows.subviews.forEach { $0.removeFromSuperview() }
-        for item in store.pending {
+        let pending = store.pending
+        for item in pending {
             rows.addSubview(WidgetRow(item: item, day: store.countdownDay) { [weak store] in store?.toggle(item.id) })
         }
-        let count = store.pending.count
+        let count = pending.count
         emptyTitle.stringValue = "暂无待办"
         emptyTitle.isHidden = count > 0
         scroll.isHidden = count == 0

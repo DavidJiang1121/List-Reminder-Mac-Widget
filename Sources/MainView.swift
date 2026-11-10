@@ -6,7 +6,17 @@ private let ink = Color(red: 0.17, green: 0.20, blue: 0.19)
 private let muted = Color(red: 0.49, green: 0.51, blue: 0.48)
 private let paper = Color(red: 0.98, green: 0.975, blue: 0.96)
 
-enum AppSection: String, CaseIterable { case pending = "待办清单", completed = "已完成", appearance = "小组件外观" }
+enum AppSection: String, CaseIterable {
+    case pending = "待办清单", completed = "已完成", achievements = "成就", appearance = "小组件外观"
+    var icon: String {
+        switch self {
+        case .pending: return "checklist"
+        case .completed: return "checkmark.circle"
+        case .achievements: return "square.grid.3x3"
+        case .appearance: return "slider.horizontal.3"
+        }
+    }
+}
 private struct EditorSession: Identifiable {
     let id = UUID()
     var item: Reminder?
@@ -16,6 +26,7 @@ struct MainView: View {
     @ObservedObject var store: ReminderStore
     var resetPosition: () -> Void
     @State private var section: AppSection = .pending
+    @State private var categoryFilter: ReminderCategory?
     @State private var editing: EditorSession?
     @State private var confirmClear = false
 
@@ -24,8 +35,11 @@ struct MainView: View {
             sidebar
             Rectangle().fill(ink.opacity(0.06)).frame(width: 1)
             Group {
-                if section == .appearance { appearancePage }
-                else { listPage }
+                switch section {
+                case .appearance: appearancePage
+                case .achievements: AchievementsView(counts: store.completionCounts, day: store.countdownDay)
+                case .pending, .completed: listPage
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(paper)
@@ -38,10 +52,10 @@ struct MainView: View {
         .alert("保存提示", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("知道了") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
-        .alert("清除所有已完成待办？", isPresented: $confirmClear) {
+        .alert("清除已完成的一次性待办？", isPresented: $confirmClear) {
             Button("取消", role: .cancel) {}
             Button("清除", role: .destructive) { store.clearCompleted() }
-        } message: { Text("清除后可以通过“撤销”恢复。") }
+        } message: { Text("成就统计和每日任务会保留。清除后可以通过“撤销”恢复。") }
         .onReceive(NotificationCenter.default.publisher(for: .newReminder)) { _ in beginAdd() }
         .onReceive(NotificationCenter.default.publisher(for: .showWidgetSettings)) { _ in section = .appearance }
     }
@@ -59,10 +73,10 @@ struct MainView: View {
             ForEach(AppSection.allCases, id: \.self) { page in
                 Button { section = page } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: page == .pending ? "checklist" : page == .completed ? "checkmark.circle" : "slider.horizontal.3").font(.system(size: 15)).frame(width: 19)
+                        Image(systemName: page.icon).font(.system(size: 15)).frame(width: 19)
                         Text(page.rawValue).font(.system(size: 12, weight: section == page ? .semibold : .regular))
                         Spacer(minLength: 2)
-                        if page != .appearance {
+                        if page == .pending || page == .completed {
                             Text("\(page == .pending ? store.pending.count : store.completed.count)")
                                 .font(.system(size: 10, weight: .medium)).monospacedDigit()
                                 .padding(.horizontal, 6).padding(.vertical, 3)
@@ -97,7 +111,9 @@ struct MainView: View {
     }
 
     private var listPage: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let allItems = section == .pending ? store.pending : store.completed
+        let items = allItems.filter { categoryFilter == nil || $0.category == categoryFilter }
+        return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Label(Date.now.formatted(.dateTime.month(.wide).day().weekday(.wide).locale(Locale(identifier: "zh_CN"))), systemImage: "sun.max")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(muted)
@@ -106,6 +122,13 @@ struct MainView: View {
                     Button { store.undo() } label: { Label("撤销\(undoTitle)", systemImage: "arrow.uturn.backward") }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(accent)
                         .accessibilityIdentifier("undoTask")
                 }
+                Picker("筛选分类", selection: $categoryFilter) {
+                    Text("全部分类").tag(nil as ReminderCategory?)
+                    ForEach(ReminderCategory.allCases) { category in
+                        Text(category.rawValue).tag(Optional(category))
+                    }
+                }
+                .labelsHidden().controlSize(.small).fixedSize().accessibilityIdentifier("categoryFilter")
             }.padding(.bottom, 27)
             HStack(alignment: .bottom) {
                 VStack(alignment: .leading, spacing: 9) {
@@ -114,7 +137,7 @@ struct MainView: View {
                 }
                 Spacer()
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("\(section == .pending ? store.pending.count : store.completed.count)").font(.system(size: 34, weight: .light, design: .rounded))
+                    Text("\(items.count)").font(.system(size: 34, weight: .light, design: .rounded))
                     Text(section == .pending ? "项待办" : "项完成").font(.system(size: 11)).foregroundStyle(muted)
                 }.padding(.bottom, 2)
             }
@@ -126,7 +149,6 @@ struct MainView: View {
                 Rectangle().fill(ink.opacity(0.08)).frame(height: 1)
             }.padding(.bottom, 10)
 
-            let items = section == .pending ? store.pending : store.completed
             if items.isEmpty {
                 VStack(spacing: 13) {
                     ZStack {
@@ -141,7 +163,7 @@ struct MainView: View {
                 ScrollView {
                     LazyVStack(spacing: 7) {
                         ForEach(items) { item in
-                            ReminderRow(item: item, countdown: item.countdown(on: store.countdownDay), toggle: { store.toggle(item.id) }, edit: { editing = EditorSession(item: item) }, delete: { store.remove(item.id) })
+                            ReminderRow(item: item, day: store.countdownDay, toggle: { store.toggle(item.id) }, edit: { editing = EditorSession(item: item) }, delete: { store.remove(item.id) })
                         }
                     }.padding(.vertical, 6)
                 }.scrollIndicators(.hidden)
@@ -156,7 +178,7 @@ struct MainView: View {
                         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(ink.opacity(0.09)))
                 }.buttonStyle(.plain).accessibilityIdentifier("newTaskButton")
                 .padding(.top, 18)
-            } else if !store.completed.isEmpty {
+            } else if allItems.contains(where: { !$0.isDaily }) {
                 HStack {
                     Spacer()
                     Button("清除已完成") { confirmClear = true }.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(accent)
@@ -232,23 +254,27 @@ struct MainView: View {
                 .foregroundStyle(selected ? accent : ink)
         }.buttonStyle(.plain).accessibilityLabel("\(title)尺寸")
     }
-    private func beginAdd() { section = .pending; editing = EditorSession() }
+    private func beginAdd() { section = .pending; categoryFilter = nil; editing = EditorSession() }
 }
 
 private struct ReminderRow: View {
     var item: Reminder
-    var countdown: ReminderCountdown?
+    var day: ReminderDay
     var toggle: () -> Void
     var edit: () -> Void
     var delete: () -> Void
     @State private var hover = false
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 20, weight: .light)).foregroundStyle(item.isCompleted ? accent.opacity(0.75) : ink.opacity(0.23))
+            if item.isCompleted {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 20, weight: .light)).foregroundStyle(accent.opacity(0.75))
+            } else {
+                ReminderRing(item: item, day: day, size: 19, neutral: ink.opacity(0.23))
+            }
             Text(item.title).font(.system(size: 13, weight: .medium)).strikethrough(item.isCompleted, color: muted.opacity(0.6))
                 .foregroundStyle(item.isCompleted ? muted : ink).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
-            if let countdown { CountdownBadge(countdown: countdown) }
+            if let badge = item.badge(on: day) { TaskBadge(badge: badge) }
             HStack(spacing: 12) {
                 Button(action: edit) { Image(systemName: "pencil").font(.system(size: 11)) }.help("编辑待办").accessibilityLabel("编辑：\(item.title)")
                 Button(action: delete) { Image(systemName: "trash").font(.system(size: 11)) }.help("删除待办").accessibilityLabel("删除：\(item.title)")
@@ -266,21 +292,51 @@ private struct ReminderRow: View {
             Button("删除", role: .destructive, action: delete)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(countdown.map { "\(item.title)，\($0.spokenLabel)" } ?? item.title)
+        .accessibilityLabel(item.accessibilityTitle(on: day))
         .accessibilityAction(named: item.isCompleted ? "恢复待办" : "完成待办", toggle)
     }
 }
 
-private struct CountdownBadge: View {
-    let countdown: ReminderCountdown
+private var dailyGradient: LinearGradient {
+    LinearGradient(colors: [Color(nsColor: DailyPalette.pink), Color(nsColor: DailyPalette.yellow)], startPoint: .leading, endPoint: .trailing)
+}
+
+private struct ReminderRing: View {
+    let item: Reminder
+    let day: ReminderDay
+    let size: CGFloat
+    let neutral: Color
+    var body: some View {
+        let status = item.badge(on: day)
+        let shape = Circle()
+        Group {
+            if item.category == .homework, status == .daily {
+                shape.strokeBorder(dailyGradient, lineWidth: 1.7)
+            } else if item.category == .homework, case .deadline(let countdown) = status {
+                shape.strokeBorder(Color(nsColor: countdown.color), lineWidth: 1.7)
+            } else {
+                shape.strokeBorder(neutral, lineWidth: 1.35)
+            }
+        }.frame(width: size, height: size).accessibilityHidden(true)
+    }
+}
+
+private struct TaskBadge: View {
+    let badge: ReminderBadge
     var size: CGFloat = 11
     var body: some View {
-        let tone = Color(nsColor: countdown.color)
-        Text(countdown.label).font(.system(size: size, weight: .semibold)).monospacedDigit()
+        let tone: Color = switch badge {
+        case .daily: Color(nsColor: DailyPalette.ink)
+        case .deadline(let countdown): Color(nsColor: countdown.color)
+        }
+        Text(badge.label).font(.system(size: size, weight: .semibold)).monospacedDigit()
             .foregroundStyle(tone).lineLimit(1).fixedSize()
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(tone.opacity(0.12), in: Capsule())
-            .accessibilityLabel(countdown.spokenLabel)
+            .background {
+                if badge == .daily { Capsule().fill(dailyGradient).opacity(DailyPalette.badgeOpacity) }
+                else { Capsule().fill(tone.opacity(0.12)) }
+            }
+            .accessibilityLabel(badge.spokenLabel)
     }
 }
 
@@ -292,15 +348,15 @@ private struct WidgetPreview: View {
             Circle().fill(.white.opacity(0.2)).frame(width: 160).blur(radius: 19).offset(x: 60, y: -90)
             VStack(alignment: .leading, spacing: 0) {
                 HStack { Text("List Reminder").font(.system(size: 13, weight: .semibold)); Spacer() }.padding(.bottom, 18)
-                let previewItems: [(String, ReminderCountdown?)] = store.pending.isEmpty
-                    ? [("写下今天的第一件事", nil), ("为自己留一点时间", nil)]
-                    : store.pending.prefix(3).map { ($0.title, $0.countdown(on: store.countdownDay)) }
-                ForEach(Array(previewItems.enumerated()), id: \.offset) { _, item in
+                let previewItems = store.pending.isEmpty
+                    ? [Reminder(title: "写下今天的第一件事"), Reminder(title: "为自己留一点时间")]
+                    : Array(store.pending.prefix(3))
+                ForEach(previewItems) { item in
                     HStack(spacing: 9) {
-                        Image(systemName: "circle").foregroundStyle(.secondary).font(.system(size: 13))
-                        Text(item.0).font(.system(size: 10)).lineLimit(1)
+                        ReminderRing(item: item, day: store.countdownDay, size: 13, neutral: .secondary)
+                        Text(item.title).font(.system(size: 10)).lineLimit(1)
                         Spacer(minLength: 0)
-                        if let countdown = item.1 { CountdownBadge(countdown: countdown, size: 8) }
+                        if let badge = item.badge(on: store.countdownDay) { TaskBadge(badge: badge, size: 8) }
                     }.padding(.vertical, 8)
                     Rectangle().fill(.primary.opacity(0.06)).frame(height: 0.5)
                 }
@@ -336,43 +392,63 @@ struct ReminderEditor: View {
     @ObservedObject var store: ReminderStore
     let item: Reminder?
     var close: (() -> Void)?
+    var resize: ((CGFloat) -> Void)?
     @State private var title: String
     @State private var enablesCountdown: Bool
     @State private var selectedDate: Date
+    @State private var category: ReminderCategory
+    @State private var daily: Bool
     @State private var saveError: String?
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focused: Bool
-    init(store: ReminderStore, item: Reminder? = nil, close: (() -> Void)? = nil) {
-        self.store = store; self.item = item; self.close = close
+    init(store: ReminderStore, item: Reminder? = nil, close: (() -> Void)? = nil, resize: ((CGFloat) -> Void)? = nil) {
+        self.store = store; self.item = item; self.close = close; self.resize = resize
         let calendar = store.countdownDay.calendar
         let initialDate = item?.deadline?.date(in: calendar) ?? calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) ?? .now
         _title = State(initialValue: item?.title ?? "")
         _enablesCountdown = State(initialValue: item?.deadline != nil)
         _selectedDate = State(initialValue: initialDate)
+        _category = State(initialValue: item?.category ?? .general)
+        _daily = State(initialValue: item?.isDaily ?? false)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(item == nil ? "添加待办" : "编辑待办").font(.system(size: 20, weight: .semibold))
             TextField("待办内容", text: $title, axis: .vertical).lineLimit(2, reservesSpace: true)
                 .textFieldStyle(.roundedBorder).focused($focused).accessibilityIdentifier("reminderTitle")
-            Toggle("启用倒计时", isOn: $enablesCountdown).toggleStyle(.switch)
-                .accessibilityIdentifier("reminderCountdownToggle")
-            VStack(alignment: .leading, spacing: 8) {
+            Picker("分类", selection: $category) {
+                ForEach(ReminderCategory.allCases) { category in Text(category.rawValue).tag(category) }
+            }.pickerStyle(.segmented).accessibilityIdentifier("reminderCategory")
+            Toggle("每日重复", isOn: $daily).toggleStyle(.checkbox)
+                .accessibilityIdentifier("reminderDailyToggle")
+            if daily {
                 HStack {
-                    Text("截止日期").font(.system(size: 12, weight: .medium))
+                    Text("当天完成后，第二天自动出现。").font(.system(size: 12)).foregroundStyle(.secondary)
                     Spacer()
-                    if enablesCountdown, let countdown = selectedDeadline.countdown(on: store.countdownDay) {
-                        CountdownBadge(countdown: countdown)
+                    TaskBadge(badge: .daily)
+                }
+            } else {
+                Toggle("启用倒计时", isOn: $enablesCountdown).toggleStyle(.switch)
+                    .accessibilityIdentifier("reminderCountdownToggle")
+                if enablesCountdown {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("截止日期").font(.system(size: 12, weight: .medium))
+                            Spacer()
+                            if let countdown = selectedDeadline.countdown(on: store.countdownDay) {
+                                TaskBadge(badge: .deadline(countdown))
+                            }
+                        }.frame(minHeight: 24)
+                        DatePicker("截止日期", selection: $selectedDate, displayedComponents: [.date])
+                            .datePickerStyle(.graphical).labelsHidden()
+                            .environment(\.calendar, store.countdownDay.calendar)
+                            .environment(\.timeZone, store.countdownDay.timeZone)
+                            .environment(\.locale, Locale(identifier: "zh_CN"))
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("reminderDeadlineCalendar")
                     }
-                }.frame(minHeight: 24)
-                DatePicker("截止日期", selection: $selectedDate, displayedComponents: [.date])
-                    .datePickerStyle(.graphical).labelsHidden()
-                    .environment(\.calendar, store.countdownDay.calendar)
-                    .environment(\.timeZone, store.countdownDay.timeZone)
-                    .environment(\.locale, Locale(identifier: "zh_CN"))
-                    .frame(maxWidth: .infinity)
-                    .accessibilityIdentifier("reminderDeadlineCalendar")
-            }.disabled(!enablesCountdown).opacity(enablesCountdown ? 1 : 0.46)
+                }
+            }
             if let saveError { Text(saveError).font(.footnote).foregroundStyle(.red).lineLimit(3) }
             Divider()
             HStack(spacing: 12) {
@@ -383,6 +459,8 @@ struct ReminderEditor: View {
             }
         }
         .padding(24).frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in resize?(height) }
         .onAppear { DispatchQueue.main.async { focused = true } }
         .onChange(of: store.countdownDay.timeZone) { oldZone, _ in
             var oldCalendar = Calendar(identifier: .gregorian)
@@ -394,8 +472,9 @@ struct ReminderEditor: View {
     private var selectedDeadline: ReminderDeadline { ReminderDeadline(selectedDate, calendar: store.countdownDay.calendar) }
     private func finish() { if let close { close() } else { dismiss() } }
     private func save() {
-        let deadline = enablesCountdown ? selectedDeadline : nil
-        let saved = item.map { store.edit($0.id, title: title, deadline: deadline) } ?? store.add(title, deadline: deadline)
+        let deadline = !daily && enablesCountdown ? selectedDeadline : nil
+        let saved = item.map { store.edit($0.id, title: title, deadline: deadline, category: category, daily: daily) }
+            ?? store.add(title, deadline: deadline, category: category, daily: daily)
         if saved { finish() } else {
             saveError = store.errorMessage ?? "无法保存待办，请重试。"
             store.errorMessage = nil
